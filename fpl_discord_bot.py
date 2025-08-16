@@ -8,8 +8,8 @@ import io
 import asyncio
 
 # --- CONFIGURATION ---
-FPL_LEAGUE_ID = "11111" # Replace with your actual league ID
-DISCORD_BOT_TOKEN = "YOUR-DISCORD-BOT-TOKEN"  # 🚨 IMPORTANT: Replace with your actual bot token
+FPL_LEAGUE_ID = "11111"
+DISCORD_BOT_TOKEN = "YOUR_DISCORD_BOT_TOKEN_HERE"  # 🚨 IMPORTANT: Replace with your actual bot token
 
 # --- FILE PATHS ---
 BACKGROUND_IMAGE_PATH = "pitch-graphic-t77-OTdp.png"
@@ -321,7 +321,7 @@ async def table(interaction: discord.Interaction):
 
         for i, manager in enumerate(manager_details):
             rank = i + 1
-            table_content += f"{str(rank):<5} {manager['name']:<20.19} {manager['gw_points']:<8} {manager['total_points']:<8} {manager['players_played']}/11\n"
+            table_content += f"{str(rank):<5} {manager['name']:<20.19} {manager['final_gw_points']:<8} {manager['live_total_points']:<8} {manager['players_played']}/11\n"
         
         table_content += "```"
         await interaction.followup.send(f"{header}\n{table_content}")
