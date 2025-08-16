@@ -36,7 +36,6 @@ class FPLBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
-        self.fpl_data_cache = {} # Simple cache for bootstrap data
 
     async def setup_hook(self):
         await self.tree.sync()
@@ -81,37 +80,74 @@ async def get_league_managers(session):
         }
     return {}
 
+# --- NEW REFACTORED HELPER FOR LIVE POINT CALCULATION ---
+async def get_live_manager_details(session, manager_entry, current_gw, live_points_map):
+    """Fetches picks/history for a manager and calculates their live score, accounting for chips."""
+    manager_id = manager_entry['entry']
+    picks_task = fetch_fpl_api(session, f"{BASE_API_URL}entry/{manager_id}/event/{current_gw}/picks/")
+    history_task = fetch_fpl_api(session, f"{BASE_API_URL}entry/{manager_id}/history/")
+    picks_data, history_data = await asyncio.gather(picks_task, history_task)
+
+    if not picks_data or not history_data:
+        return None
+
+    # Determine which players' points to count based on active chip
+    active_chip = picks_data.get('active_chip')
+    players_to_score = []
+    if active_chip == 'bboost':
+        players_to_score = picks_data['picks']  # Count all 15 players for Bench Boost
+    else:
+        players_to_score = [p for p in picks_data['picks'] if p['position'] <= 11]  # Count starting 11
+
+    # Calculate points
+    live_gw_points = sum(live_points_map.get(p['element'], {}).get('total_points', 0) * p['multiplier'] for p in players_to_score)
+    transfer_cost = picks_data['entry_history']['event_transfers_cost']
+    final_gw_points = live_gw_points - transfer_cost
+
+    # Calculate total points
+    pre_gw_total = 0
+    if current_gw > 1:
+        prev_gw_history = next((gw for gw in history_data['current'] if gw['event'] == current_gw - 1), None)
+        if prev_gw_history:
+            pre_gw_total = prev_gw_history['total_points']
+    
+    live_total_points = pre_gw_total + final_gw_points
+
+    # Calculate players played for the table view (always just the starting XI)
+    starters = [p for p in picks_data['picks'] if p['position'] <= 11]
+    players_played_count = sum(1 for p in starters if live_points_map.get(p['element'], {}).get('minutes', 0) > 0)
+
+    return {
+        "id": manager_id,
+        "name": manager_entry['player_name'],
+        "live_total_points": live_total_points,
+        "final_gw_points": final_gw_points,
+        "players_played": players_played_count,
+        "picks_data": picks_data
+    }
 
 # --- IMAGE GENERATION LOGIC ---
 def calculate_player_coordinates(picks, all_players):
-    """Calculates (x, y) coordinates for each player based on formation."""
     starters = [p for p in picks if p['position'] <= 11]
     bench = [p for p in picks if p['position'] > 11]
-
     positions = {1: [], 2: [], 3: [], 4: []}
     for p in starters:
         player_type = all_players[p['element']]['element_type']
         positions[player_type].append(p)
-
     coords = {}
     pitch_width = PITCH_X_END - PITCH_X_START
-
     if positions[1]:
         coords[positions[1][0]['element']] = ((PITCH_X_START + PITCH_X_END) // 2, GK_Y)
-    
     for pos_type, y_coord in [(2, DEF_Y), (3, MID_Y), (4, FWD_Y)]:
         num_players = len(positions[pos_type])
         for i, p in enumerate(positions[pos_type]):
             x = PITCH_X_START + ((i + 1) * pitch_width) / (num_players + 1)
             coords[p['element']] = (int(x), y_coord)
-    
     for i, p in enumerate(bench):
         coords[p['element']] = (BENCH_X, BENCH_Y_START + (i * BENCH_Y_SPACING))
-        
     return coords
 
 def generate_team_image(fpl_data, summary_data):
-    """Generates a team image in memory and returns it as bytes."""
     try:
         background = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
         draw = ImageDraw.Draw(background)
@@ -126,19 +162,15 @@ def generate_team_image(fpl_data, summary_data):
     all_players = {p['id']: p for p in fpl_data['bootstrap']['elements']}
     all_teams = {t['id']: t for t in fpl_data['bootstrap']['teams']}
     live_points = {p['id']: p['stats']['total_points'] for p in fpl_data['live']['elements']}
-    
     coordinates = calculate_player_coordinates(fpl_data['picks']['picks'], all_players)
 
     for player_pick in fpl_data['picks']['picks']:
         player_id = player_pick['element']
         player_info = all_players[player_id]
-        
         player_name = player_info['web_name']
         player_points = live_points.get(player_id, 0) * player_pick.get('multiplier', 1)
-        
         asset_img = None
         asset_size = (88, 112)
-        
         headshot_path = os.path.join(HEADSHOTS_DIR, f"{player_name.replace(' ', '_')}_{player_id}.png")
         try:
             asset_img = Image.open(headshot_path).convert("RGBA")
@@ -152,7 +184,6 @@ def generate_team_image(fpl_data, summary_data):
                 asset_img = Image.open(jersey_path).convert("RGBA")
             except FileNotFoundError:
                 continue
-        
         asset_img = asset_img.resize(asset_size, Image.LANCZOS)
         x, y = coordinates[player_id]
         paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
@@ -162,19 +193,15 @@ def generate_team_image(fpl_data, summary_data):
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
         box_width = max(name_bbox[2], points_bbox[2]) + 10
-        
         name_box_height = (name_bbox[3] - name_bbox[1]) + 4
         name_box_x = x - box_width // 2
         name_box_y = y + 55
-        
         points_box_height = (points_bbox[3] - points_bbox[1]) + 4
         points_box_x = name_box_x
-        points_box_y = name_box_y + name_box_height 
-
+        points_box_y = name_box_y + name_box_height
         draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
         draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=(0, 135, 81, 150))
-        
-        draw.text((x - name_bbox[2] / 2, name_box_y - 4), name_text, font=name_font, fill="white")
+        draw.text((x - name_bbox[2] / 2, name_box_y - 2), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
         if player_pick['is_captain']:
@@ -200,7 +227,7 @@ def generate_team_image(fpl_data, summary_data):
 @bot.tree.command(name="team", description="Generates an image of a manager's current FPL team.")
 @app_commands.describe(manager="Select the manager's team to view.")
 async def team(interaction: discord.Interaction, manager: str):
-    await interaction.response.defer() 
+    await interaction.response.defer()
     manager_id = int(manager)
 
     async with aiohttp.ClientSession() as session:
@@ -209,8 +236,6 @@ async def team(interaction: discord.Interaction, manager: str):
             await interaction.followup.send("Could not determine the current gameweek.")
             return
 
-        # --- MODIFIED LOGIC START ---
-        # Fetch data required for all managers
         bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
         live_data = await fetch_fpl_api(session, f"{BASE_API_URL}event/{current_gw}/live/")
         league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/")
@@ -221,36 +246,7 @@ async def team(interaction: discord.Interaction, manager: str):
 
         live_points_map = {p['id']: p['stats'] for p in live_data['elements']}
         
-        manager_live_scores = []
-        
-        # Coroutines to fetch data for all managers in parallel
-        async def get_manager_data(mgr):
-            mgr_id = mgr['entry']
-            picks_task = fetch_fpl_api(session, f"{BASE_API_URL}entry/{mgr_id}/event/{current_gw}/picks/")
-            history_task = fetch_fpl_api(session, f"{BASE_API_URL}entry/{mgr_id}/history/")
-            picks_data, history_data = await asyncio.gather(picks_task, history_task)
-            
-            if not picks_data or not history_data:
-                return None
-
-            starters = [p for p in picks_data['picks'] if p['position'] <= 11]
-            live_gw_points = sum(live_points_map.get(p['element'], {}).get('total_points', 0) * p['multiplier'] for p in starters)
-            transfer_cost = picks_data['entry_history']['event_transfers_cost']
-            final_gw_points = live_gw_points - transfer_cost
-
-            pre_gw_total = 0
-            if current_gw > 1:
-                prev_gw_history = next((gw for gw in history_data['current'] if gw['event'] == current_gw - 1), None)
-                if prev_gw_history: pre_gw_total = prev_gw_history['total_points']
-
-            return {
-                "id": mgr_id,
-                "live_total_points": pre_gw_total + final_gw_points,
-                "final_gw_points": final_gw_points,
-                "picks_data": picks_data # Store for later use
-            }
-
-        tasks = [get_manager_data(mgr) for mgr in league_data['standings']['results']]
+        tasks = [get_live_manager_details(session, mgr, current_gw, live_points_map) for mgr in league_data['standings']['results']]
         all_manager_data = await asyncio.gather(*tasks)
         
         manager_live_scores = [d for d in all_manager_data if d is not None]
@@ -265,8 +261,8 @@ async def team(interaction: discord.Interaction, manager: str):
                 break
         
         if not selected_manager_details:
-             await interaction.followup.send("Could not calculate live data for the selected manager.")
-             return
+            await interaction.followup.send("Could not calculate live data for the selected manager.")
+            return
 
         summary_data = {
             "rank": live_rank,
@@ -280,8 +276,6 @@ async def team(interaction: discord.Interaction, manager: str):
             "picks": selected_manager_details['picks_data']
         }
         
-        # --- MODIFIED LOGIC END ---
-
         image_bytes = generate_team_image(fpl_data_for_image, summary_data)
         if image_bytes:
             file = discord.File(fp=image_bytes, filename="fpl_team.png")
@@ -315,31 +309,10 @@ async def table(interaction: discord.Interaction):
 
         live_points_map = {p['id']: p['stats'] for p in live_data['elements']}
         
-        async def get_manager_data(manager):
-            manager_id = manager['entry']
-            picks_task = fetch_fpl_api(session, f"{BASE_API_URL}entry/{manager_id}/event/{current_gw}/picks/")
-            history_task = fetch_fpl_api(session, f"{BASE_API_URL}entry/{manager_id}/history/")
-            picks_data, history_data = await asyncio.gather(picks_task, history_task)
-
-            if not picks_data or not history_data: return None
-
-            starters = [p for p in picks_data['picks'] if p['position'] <= 11]
-            live_gw_points = sum(live_points_map.get(p['element'], {}).get('total_points', 0) * p['multiplier'] for p in starters)
-            players_played = sum(1 for p in starters if live_points_map.get(p['element'], {}).get('minutes', 0) > 0)
-            transfer_cost = picks_data['entry_history']['event_transfers_cost']
-            final_gw_points = live_gw_points - transfer_cost
-
-            pre_gw_total = 0
-            if current_gw > 1:
-                prev_gw_history = next((gw for gw in history_data['current'] if gw['event'] == current_gw - 1), None)
-                if prev_gw_history: pre_gw_total = prev_gw_history['total_points']
-
-            return {"name": manager['player_name'], "gw_points": final_gw_points, "total_points": pre_gw_total + final_gw_points, "played": players_played}
-
-        tasks = [get_manager_data(manager) for manager in league_data['standings']['results']]
+        tasks = [get_live_manager_details(session, manager, current_gw, live_points_map) for manager in league_data['standings']['results']]
         manager_details = [res for res in await asyncio.gather(*tasks) if res]
 
-        manager_details.sort(key=lambda x: x['total_points'], reverse=True)
+        manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
 
         header = f"🏆 {league_data['league']['name']} - Live GW {current_gw} Table 🏆"
         table_content = "```"
@@ -348,7 +321,7 @@ async def table(interaction: discord.Interaction):
 
         for i, manager in enumerate(manager_details):
             rank = i + 1
-            table_content += f"{str(rank):<5} {manager['name']:<20.19} {manager['gw_points']:<8} {manager['total_points']:<8} {manager['played']}/11\n"
+            table_content += f"{str(rank):<5} {manager['name']:<20.19} {manager['gw_points']:<8} {manager['total_points']:<8} {manager['players_played']}/11\n"
         
         table_content += "```"
         await interaction.followup.send(f"{header}\n{table_content}")
