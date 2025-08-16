@@ -8,7 +8,7 @@ import io
 import asyncio
 
 # --- CONFIGURATION ---
-FPL_LEAGUE_ID = "11111"
+FPL_LEAGUE_ID = "70625"
 DISCORD_BOT_TOKEN = "YOUR_DISCORD_BOT_TOKEN_HERE"  # 🚨 IMPORTANT: Replace with your actual bot token
 
 # --- FILE PATHS ---
@@ -201,7 +201,7 @@ def generate_team_image(fpl_data, summary_data):
         points_box_y = name_box_y + name_box_height
         draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
         draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=(0, 135, 81, 150))
-        draw.text((x - name_bbox[2] / 2, name_box_y - 2), name_text, font=name_font, fill="white")
+        draw.text((x - name_bbox[2] / 2, name_box_y - 4), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
         if player_pick['is_captain']:
