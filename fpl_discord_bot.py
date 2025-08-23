@@ -326,6 +326,79 @@ async def table(interaction: discord.Interaction):
         table_content += "```"
         await interaction.followup.send(f"{header}\n{table_content}")
 
+@bot.tree.command(name="player", description="Shows which managers in the league own a specific player.")
+@app_commands.describe(player="Select the player to check ownership for.")
+async def player(interaction: discord.Interaction, player: str):
+    await interaction.response.defer()
+    player_id = int(player)
+
+    async with aiohttp.ClientSession() as session:
+        current_gw = await get_current_gameweek(session)
+        if not current_gw:
+            await interaction.followup.send("Could not determine the current gameweek.")
+            return
+
+        bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
+        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/")
+
+        if not bootstrap_data or not league_data:
+            await interaction.followup.send("Failed to fetch FPL data. Please try again later.")
+            return
+
+        all_players = {p['id']: p for p in bootstrap_data['elements']}
+        selected_player = all_players.get(player_id)
+        
+        if not selected_player:
+            await interaction.followup.send("Player not found.")
+            return
+
+        player_name = f"{selected_player['first_name']} {selected_player['second_name']}"
+        
+        tasks = []
+        for manager in league_data['standings']['results']:
+            manager_id = manager['entry']
+            tasks.append(fetch_fpl_api(session, f"{BASE_API_URL}entry/{manager_id}/event/{current_gw}/picks/"))
+        
+        all_picks_data = await asyncio.gather(*tasks)
+        
+        owners = []
+        for i, picks_data in enumerate(all_picks_data):
+            if picks_data and 'picks' in picks_data:
+                manager_name = league_data['standings']['results'][i]['player_name']
+                for pick in picks_data['picks']:
+                    if pick['element'] == player_id:
+                        owners.append(manager_name)
+                        break
+        
+        if owners:
+            owner_count = len(owners)
+            response = f"**{player_name}** features in **{owner_count}** team{'s' if owner_count != 1 else ''}:\n"
+            for owner in owners:
+                response += f"• {owner}\n"
+        else:
+            response = f"**{player_name}** is not owned by any managers in the league."
+        
+        await interaction.followup.send(response)
+
+@player.autocomplete('player')
+async def player_autocomplete(interaction: discord.Interaction, current: str):
+    async with aiohttp.ClientSession() as session:
+        bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
+        if not bootstrap_data:
+            return []
+        
+        all_players = bootstrap_data['elements']
+        choices = []
+        
+        for player in all_players:
+            full_name = f"{player['first_name']} {player['second_name']}"
+            web_name = player['web_name']
+            if current.lower() in full_name.lower() or current.lower() in web_name.lower():
+                display_name = f"{full_name} ({web_name})"
+                choices.append(app_commands.Choice(name=display_name, value=str(player['id'])))
+        
+        return sorted(choices, key=lambda x: x.name)[:25]
+
 
 if __name__ == "__main__":
     if DISCORD_BOT_TOKEN == "YOUR_DISCORD_BOT_TOKEN_HERE":
