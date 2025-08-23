@@ -69,6 +69,15 @@ async def get_current_gameweek(session):
         return current_event['id'] if current_event else None
     return None
 
+async def get_last_completed_gameweek(session):
+    """Determines the most recently completed FPL gameweek."""
+    bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
+    if bootstrap_data:
+        completed_events = [event for event in bootstrap_data['events'] if event['finished']]
+        if completed_events:
+            return max(completed_events, key=lambda x: x['id'])['id']
+    return None
+
 async def get_league_managers(session):
     """Fetches all manager names and IDs for the configured league."""
     league_url = f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/"
@@ -216,6 +225,137 @@ def generate_team_image(fpl_data, summary_data):
         text_width = text_bbox[2] - text_bbox[0]
         x_pos = SUMMARY_X - text_width
         draw.text((x_pos, y_pos), text, font=summary_font, fill="white", stroke_width=1, stroke_fill="black")
+
+    img_byte_arr = io.BytesIO()
+    background.save(img_byte_arr, format='PNG')
+    img_byte_arr.seek(0)
+    return img_byte_arr
+
+def generate_dreamteam_image(fpl_data, summary_data):
+    """Generate dream team image with Player of the Week graphic."""
+    try:
+        background = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
+        draw = ImageDraw.Draw(background)
+        name_font = ImageFont.truetype(FONT_PATH, NAME_FONT_SIZE)
+        points_font = ImageFont.truetype(FONT_PATH, POINTS_FONT_SIZE)
+        summary_font = ImageFont.truetype(FONT_PATH, SUMMARY_FONT_SIZE)
+        potw_font = ImageFont.truetype(FONT_PATH, 20)  # Player of the Week font
+    except Exception as e:
+        print(f"Error loading resources: {e}")
+        return None
+
+    all_players = {p['id']: p for p in fpl_data['bootstrap']['elements']}
+    all_teams = {t['id']: t for t in fpl_data['bootstrap']['teams']}
+    live_points = {p['id']: p['stats']['total_points'] for p in fpl_data['live']['elements']}
+    coordinates = calculate_player_coordinates(fpl_data['picks']['picks'], all_players)
+
+    # Draw players (same as original team image but without captain/vice captain)
+    for player_pick in fpl_data['picks']['picks']:
+        player_id = player_pick['element']
+        player_info = all_players[player_id]
+        player_name = player_info['web_name']
+        player_points = live_points.get(player_id, 0) * player_pick.get('multiplier', 1)
+        asset_img = None
+        asset_size = (88, 112)
+        headshot_path = os.path.join(HEADSHOTS_DIR, f"{player_name.replace(' ', '_')}_{player_id}.png")
+        try:
+            asset_img = Image.open(headshot_path).convert("RGBA")
+        except FileNotFoundError:
+            team_id = player_info['team']
+            team_name = all_teams[team_id]['name'].replace(' ', '_')
+            kit = 'goalkeeper' if player_info['element_type'] == 1 else 'home'
+            jersey_path = os.path.join(JERSEYS_DIR, f"{team_name}_{kit}.webp")
+            asset_size = (110, 110)
+            try:
+                asset_img = Image.open(jersey_path).convert("RGBA")
+            except FileNotFoundError:
+                continue
+        asset_img = asset_img.resize(asset_size, Image.LANCZOS)
+        x, y = coordinates[player_id]
+        paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
+        background.paste(asset_img, (paste_x, paste_y), asset_img)
+
+        name_text, points_text = player_name, f"{player_points} pts"
+        name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
+        points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
+        box_width = max(name_bbox[2], points_bbox[2]) + 10
+        name_box_height = (name_bbox[3] - name_bbox[1]) + 4
+        name_box_x = x - box_width // 2
+        name_box_y = y + 55
+        points_box_height = (points_bbox[3] - points_bbox[1]) + 4
+        points_box_x = name_box_x
+        points_box_y = name_box_y + name_box_height
+        draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
+        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=(0, 135, 81, 150))
+        draw.text((x - name_bbox[2] / 2, name_box_y - 4), name_text, font=name_font, fill="white")
+        draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
+
+    # Draw summary info (modified for dream team)
+    summary_strings = [f"Dream Team", f"Total: {summary_data['total_points']} pts", f"Gameweek {summary_data['gameweek']}"]
+    for i, text in enumerate(summary_strings):
+        y_pos = SUMMARY_Y_START + (i * SUMMARY_LINE_SPACING)
+        text_bbox = draw.textbbox((0, 0), text, font=summary_font)
+        text_width = text_bbox[2] - text_bbox[0]
+        x_pos = SUMMARY_X - text_width
+        draw.text((x_pos, y_pos), text, font=summary_font, fill="white", stroke_width=1, stroke_fill="black")
+
+    # Draw Player of the Week section
+    potw_data = summary_data['player_of_week']
+    potw_player_info = potw_data['player_info']
+    potw_name = potw_player_info['web_name']
+    potw_points = potw_data['points']
+    
+    # Player of the Week positioning (top left, same Y as goalkeeper)
+    potw_x = 140  # Left side of the image
+    potw_y = GK_Y - 20  # Same Y axis as goalkeeper, slightly above
+    
+    # Try to load player headshot for POTW
+    potw_headshot_path = os.path.join(HEADSHOTS_DIR, f"{potw_name.replace(' ', '_')}_{potw_data['id']}.png")
+    potw_img = None
+    try:
+        potw_img = Image.open(potw_headshot_path).convert("RGBA")
+        potw_img = potw_img.resize((60, 76), Image.LANCZOS)
+    except FileNotFoundError:
+        # Fallback to jersey if headshot not found
+        team_id = potw_player_info['team']
+        team_name = all_teams[team_id]['name'].replace(' ', '_')
+        kit = 'goalkeeper' if potw_player_info['element_type'] == 1 else 'home'
+        jersey_path = os.path.join(JERSEYS_DIR, f"{team_name}_{kit}.webp")
+        try:
+            potw_img = Image.open(jersey_path).convert("RGBA")
+            potw_img = potw_img.resize((60, 60), Image.LANCZOS)
+        except FileNotFoundError:
+            pass
+    
+    # Draw POTW background box
+    potw_box_width = 220  # Made wider to fit "Player of the Week" text
+    potw_box_height = 110
+    draw.rounded_rectangle([potw_x, potw_y, potw_x + potw_box_width, potw_y + potw_box_height], 
+                          radius=10, fill=(255, 215, 0, 200))  # Gold background
+    
+    # Draw "Player of the Week" title
+    title_text = "Player of the Week"
+    title_bbox = draw.textbbox((0, 0), title_text, font=potw_font)
+    title_x = potw_x + (potw_box_width - title_bbox[2]) // 2
+    draw.text((title_x, potw_y + 5), title_text, font=potw_font, fill="black")
+    
+    # Draw player image if available
+    if potw_img:
+        img_x = potw_x + 15
+        img_y = potw_y + 30
+        background.paste(potw_img, (img_x, img_y), potw_img)
+        
+        # Draw name and points beside the image
+        name_x = img_x + potw_img.width + 15
+        draw.text((name_x, img_y), potw_name, font=potw_font, fill="black")
+        draw.text((name_x, img_y + 25), f"{potw_points} pts", font=potw_font, fill="black")
+        draw.text((name_x, img_y + 50), f"G: {potw_data['goals']} A: {potw_data['assists']}", font=potw_font, fill="black")
+    else:
+        # Draw text only if no image
+        name_x = potw_x + 15
+        draw.text((name_x, potw_y + 35), potw_name, font=potw_font, fill="black")
+        draw.text((name_x, potw_y + 55), f"{potw_points} pts", font=potw_font, fill="black")
+        draw.text((name_x, potw_y + 75), f"Goals: {potw_data['goals']}, Assists: {potw_data['assists']}", font=potw_font, fill="black")
 
     img_byte_arr = io.BytesIO()
     background.save(img_byte_arr, format='PNG')
@@ -398,6 +538,169 @@ async def player_autocomplete(interaction: discord.Interaction, current: str):
                 choices.append(app_commands.Choice(name=display_name, value=str(player['id'])))
         
         return sorted(choices, key=lambda x: x.name)[:25]
+
+def find_optimal_dreamteam(all_squad_players):
+    """Find the optimal 11 players following FPL formation rules with tie-breaking."""
+    # Separate players by position
+    goalkeepers = []
+    defenders = []
+    midfielders = []
+    forwards = []
+    
+    for player_id, player_data in all_squad_players.items():
+        element_type = player_data['element_type']
+        # Create sorting key: points (desc), goals (desc), assists (desc), minutes (desc)
+        sort_key = (-player_data['points'], -player_data['goals'], -player_data['assists'], -player_data['minutes'])
+        
+        if element_type == 1:  # GK
+            goalkeepers.append((player_id, sort_key))
+        elif element_type == 2:  # DEF
+            defenders.append((player_id, sort_key))
+        elif element_type == 3:  # MID
+            midfielders.append((player_id, sort_key))
+        elif element_type == 4:  # FWD
+            forwards.append((player_id, sort_key))
+    
+    # Sort each position by the tie-breaking criteria
+    goalkeepers.sort(key=lambda x: x[1])
+    defenders.sort(key=lambda x: x[1])
+    midfielders.sort(key=lambda x: x[1])
+    forwards.sort(key=lambda x: x[1])
+    
+    # Must have at least 1 GK, 3 DEF, 3 MID, 1 FWD
+    if (len(goalkeepers) < 1 or len(defenders) < 3 or 
+        len(midfielders) < 3 or len(forwards) < 1):
+        return None, None
+    
+    # Try all valid formations and find the one with highest total points
+    best_team = None
+    best_points = -1
+    best_formation = None
+    
+    # Valid formations: (def_count, mid_count, fwd_count)
+    # Must sum to 10 (plus 1 GK = 11 total)
+    valid_formations = [
+        (3, 5, 2), (3, 4, 3), (4, 5, 1), (4, 4, 2), (4, 3, 3), (5, 4, 1), (5, 3, 2)
+    ]
+    
+    for def_count, mid_count, fwd_count in valid_formations:
+        # Check if we have enough players for this formation
+        if (def_count <= len(defenders) and 
+            mid_count <= len(midfielders) and 
+            fwd_count <= len(forwards)):
+            
+            # Build team for this formation
+            team = []
+            team.append(goalkeepers[0][0])  # Best GK
+            
+            # Add best players for each position
+            for i in range(def_count):
+                team.append(defenders[i][0])
+            for i in range(mid_count):
+                team.append(midfielders[i][0])
+            for i in range(fwd_count):
+                team.append(forwards[i][0])
+            
+            # Calculate total points for this formation
+            total_points = sum(all_squad_players[pid]['points'] for pid in team)
+            
+            if total_points > best_points:
+                best_points = total_points
+                best_team = team
+                best_formation = f"{def_count}-{mid_count}-{fwd_count}"
+    
+    return best_team, best_formation
+
+@bot.tree.command(name="dreamteam", description="Shows the optimal XI from the league for the most recent completed gameweek.")
+async def dreamteam(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    async with aiohttp.ClientSession() as session:
+        last_completed_gw = await get_last_completed_gameweek(session)
+        if not last_completed_gw:
+            await interaction.followup.send("Could not determine the last completed gameweek.")
+            return
+
+        # Fetch required data
+        bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
+        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/")
+        completed_gw_data = await fetch_fpl_api(session, f"{BASE_API_URL}event/{last_completed_gw}/live/")
+
+        if not all([bootstrap_data, league_data, completed_gw_data]):
+            await interaction.followup.send("Failed to fetch FPL data. Please try again later.")
+            return
+
+        all_players = {p['id']: p for p in bootstrap_data['elements']}
+        completed_gw_stats = {p['id']: p['stats'] for p in completed_gw_data['elements']}
+        
+        # Get all unique players from all managers' squads for the completed gameweek
+        all_squad_players = {}
+        tasks = []
+        for manager in league_data['standings']['results']:
+            manager_id = manager['entry']
+            tasks.append(fetch_fpl_api(session, f"{BASE_API_URL}entry/{manager_id}/event/{last_completed_gw}/picks/"))
+        
+        all_picks_data = await asyncio.gather(*tasks)
+        
+        for picks_data in all_picks_data:
+            if picks_data and 'picks' in picks_data:
+                for pick in picks_data['picks']:
+                    player_id = pick['element']
+                    if player_id not in all_squad_players:
+                        player_stats = completed_gw_stats.get(player_id, {})
+                        all_squad_players[player_id] = {
+                            'id': player_id,
+                            'element_type': all_players[player_id]['element_type'],
+                            'points': player_stats.get('total_points', 0),
+                            'goals': player_stats.get('goals_scored', 0),
+                            'assists': player_stats.get('assists', 0),
+                            'minutes': player_stats.get('minutes', 0),
+                            'player_info': all_players[player_id]
+                        }
+        
+        # Find optimal formation and team
+        optimal_team, best_formation = find_optimal_dreamteam(all_squad_players)
+        if not optimal_team:
+            await interaction.followup.send("Could not create dream team - insufficient players in each position.")
+            return
+        
+        # Calculate total points and find player of the week
+        total_points = sum(all_squad_players[pid]['points'] for pid in optimal_team)
+        player_of_week = max([all_squad_players[pid] for pid in optimal_team], 
+                           key=lambda x: (x['points'], x['goals'], x['assists'], x['minutes']))
+        
+        # Create mock picks data for image generation
+        dream_picks = []
+        for i, player_id in enumerate(optimal_team):
+            dream_picks.append({
+                'element': player_id,
+                'position': i + 1,
+                'multiplier': 1,
+                'is_captain': False,
+                'is_vice_captain': False
+            })
+        
+        # Prepare data for image generation
+        summary_data = {
+            "formation": best_formation,
+            "total_points": total_points,
+            "gameweek": last_completed_gw,
+            "player_of_week": player_of_week
+        }
+
+        fpl_data_for_image = {
+            "bootstrap": bootstrap_data,
+            "live": completed_gw_data,
+            "picks": {"picks": dream_picks}
+        }
+        
+        # Generate image
+        image_bytes = generate_dreamteam_image(fpl_data_for_image, summary_data)
+        if image_bytes:
+            file = discord.File(fp=image_bytes, filename="fpl_dreamteam.png")
+            await interaction.followup.send(f"🌟 **Dream Team for GW {last_completed_gw}** 🌟", file=file)
+        else:
+            await interaction.followup.send("Sorry, there was an error creating the dream team image.")
 
 
 if __name__ == "__main__":
