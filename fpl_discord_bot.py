@@ -507,7 +507,11 @@ async def player(interaction: discord.Interaction, player: str):
                 manager_name = league_data['standings']['results'][i]['player_name']
                 for pick in picks_data['picks']:
                     if pick['element'] == player_id:
-                        owners.append(manager_name)
+                        # Check if player is on bench (positions 12-15) or starting XI (positions 1-11)
+                        if pick['position'] > 11:
+                            owners.append(f"{manager_name} **(B)**")  # On bench
+                        else:
+                            owners.append(manager_name)  # Starting XI
                         break
         
         if owners:
