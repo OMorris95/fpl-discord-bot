@@ -706,6 +706,60 @@ async def dreamteam(interaction: discord.Interaction):
         else:
             await interaction.followup.send("Sorry, there was an error creating the dream team image.")
 
+@bot.tree.command(name="captains", description="Shows which player each manager captained for the current gameweek.")
+async def captains(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    async with aiohttp.ClientSession() as session:
+        current_gw = await get_current_gameweek(session)
+        if not current_gw:
+            await interaction.followup.send("Could not determine the current gameweek.")
+            return
+
+        bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
+        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/")
+
+        if not bootstrap_data or not league_data:
+            await interaction.followup.send("Failed to fetch FPL data. Please try again later.")
+            return
+
+        all_players = {p['id']: p for p in bootstrap_data['elements']}
+        
+        # Get all managers' picks for current gameweek
+        tasks = []
+        for manager in league_data['standings']['results']:
+            manager_id = manager['entry']
+            tasks.append(fetch_fpl_api(session, f"{BASE_API_URL}entry/{manager_id}/event/{current_gw}/picks/"))
+        
+        all_picks_data = await asyncio.gather(*tasks)
+        
+        captain_info = []
+        for i, picks_data in enumerate(all_picks_data):
+            if picks_data and 'picks' in picks_data:
+                manager_name = league_data['standings']['results'][i]['player_name']
+                
+                # Find the captain (is_captain = True)
+                captain_pick = None
+                for pick in picks_data['picks']:
+                    if pick['is_captain']:
+                        captain_pick = pick
+                        break
+                
+                if captain_pick:
+                    captain_id = captain_pick['element']
+                    captain_player_info = all_players[captain_id]
+                    captain_name = f"{captain_player_info['first_name']} {captain_player_info['second_name']}"
+                    captain_info.append((manager_name, captain_name))
+        
+        if captain_info:
+            response = f"**Captain choices for GW {current_gw}:**\n\n"
+            for manager_name, captain_name in captain_info:
+                response += f"{manager_name} - **{captain_name}**\n"
+        else:
+            response = "No captain information found for the current gameweek."
+        
+        await interaction.followup.send(response)
+
 
 if __name__ == "__main__":
     if DISCORD_BOT_TOKEN == "YOUR_DISCORD_BOT_TOKEN_HERE":
