@@ -2,3 +2,4 @@ player_headshots/
 team_jerseys/
 __pycache__/
 venv/
+.env

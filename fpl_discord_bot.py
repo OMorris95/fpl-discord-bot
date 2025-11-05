@@ -6,10 +6,14 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 import io
 import asyncio
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # --- CONFIGURATION ---
-FPL_LEAGUE_ID = "70625"
-DISCORD_BOT_TOKEN = "YOUR_DISCORD_BOT_TOKEN_HERE"  # 🚨 IMPORTANT: Replace with your actual bot token
+FPL_LEAGUE_ID = os.getenv("FPL_LEAGUE_ID")
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
 # --- FILE PATHS ---
 BACKGROUND_IMAGE_PATH = "pitch-graphic-t77-OTdp.png"
@@ -762,7 +766,9 @@ async def captains(interaction: discord.Interaction):
 
 
 if __name__ == "__main__":
-    if DISCORD_BOT_TOKEN == "YOUR_DISCORD_BOT_TOKEN_HERE":
-        print("!!! ERROR: Please replace 'YOUR_DISCORD_BOT_TOKEN_HERE' with your actual bot token in the script.")
+    if not DISCORD_BOT_TOKEN:
+        print("!!! ERROR: DISCORD_BOT_TOKEN not found in .env file. Please create a .env file with your bot token.")
+    elif not FPL_LEAGUE_ID:
+        print("!!! ERROR: FPL_LEAGUE_ID not found in .env file. Please create a .env file with your league ID.")
     else:
         bot.run(DISCORD_BOT_TOKEN)
