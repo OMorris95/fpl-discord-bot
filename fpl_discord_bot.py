@@ -219,7 +219,10 @@ def generate_team_image(fpl_data, summary_data):
         player_id = player_pick['element']
         player_info = all_players[player_id]
         player_name = player_info['web_name']
-        player_points = live_points.get(player_id, 0) * player_pick.get('multiplier', 1)
+        base_points = live_points.get(player_id, 0)
+        multiplier = player_pick.get('multiplier', 1)
+        is_bench_player = player_pick['position'] > 11 and multiplier == 0
+        display_points = base_points if is_bench_player else base_points * multiplier
         asset_img = None
         asset_size = (88, 112)
         headshot_path = os.path.join(HEADSHOTS_DIR, f"{player_name.replace(' ', '_')}_{player_id}.png")
@@ -240,7 +243,7 @@ def generate_team_image(fpl_data, summary_data):
         paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
         background.paste(asset_img, (paste_x, paste_y), asset_img)
 
-        name_text, points_text = player_name, f"{player_points} pts"
+        name_text, points_text = player_name, f"{display_points} pts"
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
         box_width = max(name_bbox[2], points_bbox[2]) + 10
@@ -316,7 +319,10 @@ def generate_dreamteam_image(fpl_data, summary_data):
         player_id = player_pick['element']
         player_info = all_players[player_id]
         player_name = player_info['web_name']
-        player_points = live_points.get(player_id, 0) * player_pick.get('multiplier', 1)
+        base_points = live_points.get(player_id, 0)
+        multiplier = player_pick.get('multiplier', 1)
+        is_bench_player = player_pick['position'] > 11 and multiplier == 0
+        display_points = base_points if is_bench_player else base_points * multiplier
         asset_img = None
         asset_size = (88, 112)
         headshot_path = os.path.join(HEADSHOTS_DIR, f"{player_name.replace(' ', '_')}_{player_id}.png")
@@ -337,7 +343,7 @@ def generate_dreamteam_image(fpl_data, summary_data):
         paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
         background.paste(asset_img, (paste_x, paste_y), asset_img)
 
-        name_text, points_text = player_name, f"{player_points} pts"
+        name_text, points_text = player_name, f"{display_points} pts"
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
         box_width = max(name_bbox[2], points_bbox[2]) + 10
