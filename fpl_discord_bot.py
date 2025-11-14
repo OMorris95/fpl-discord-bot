@@ -147,6 +147,19 @@ def format_player_price(player):
     return f"£{player.get('now_cost', 0) / 10:.1f}m"
 
 
+def build_manager_url(entry_id, gameweek=None):
+    """Return the FPL website URL for a manager's team."""
+    if gameweek:
+        return f"https://fantasy.premierleague.com/entry/{entry_id}/event/{gameweek}"
+    return f"https://fantasy.premierleague.com/entry/{entry_id}/history/"
+
+
+def format_manager_link(label, entry_id, gameweek=None):
+    """Wrap a label in Markdown linking to the manager's FPL team."""
+    url = build_manager_url(entry_id, gameweek)
+    return f"[{label}](<{url}>)"
+
+
 async def get_manager_transfer_activity(session, manager_entry_id, gameweek):
     """Fetch transfer, chip, and cost info for a manager for the given gameweek."""
     transfers_task = fetch_fpl_api(session, f"{BASE_API_URL}entry/{manager_entry_id}/transfers/")
@@ -537,7 +550,7 @@ async def table(interaction: discord.Interaction):
 
         manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
 
-        header = f"🏆 {league_data['league']['name']} - Live GW {current_gw} Table 🏆"
+        header = f"**🏆 {league_data['league']['name']} - Live GW {current_gw} Table 🏆**"
         table_content = "```"
         table_content += f"{'Rank':<5} {'Manager':<20} {'GW Pts':<8} {'Total':<8} {'Played':<8}\n"
         table_content += "-" * 52 + "\n"
@@ -545,7 +558,7 @@ async def table(interaction: discord.Interaction):
         for i, manager in enumerate(manager_details):
             rank = i + 1
             table_content += f"{str(rank):<5} {manager['name']:<20.19} {manager['final_gw_points']:<8} {manager['live_total_points']:<8} {manager['players_played']}/11\n"
-        
+
         table_content += "```"
         await interaction.followup.send(f"{header}\n{table_content}")
 
@@ -824,9 +837,12 @@ async def transfers(interaction: discord.Interaction):
         for manager, data in zip(managers, manager_transfer_data):
             manager_name = manager['player_name']
             team_name = manager['entry_name']
+            entry_id = manager['entry']
+            manager_link = format_manager_link(manager_name, entry_id, current_gw)
+            team_link = format_manager_link(team_name, entry_id, current_gw)
 
             if data is None:
-                lines.append(f"{manager_name} - {team_name}:")
+                lines.append(f"{manager_link} - {team_link}:")
                 lines.append("    Unable to retrieve transfer data.")
                 continue
 
@@ -842,7 +858,7 @@ async def transfers(interaction: discord.Interaction):
             if not transfers_this_week and not status_tokens:
                 continue
 
-            lines.append(f"**{manager_name} - {team_name}{suffix}**")
+            lines.append(f"**{manager_link} - {team_link}{suffix}**")
 
             for transfer in transfers_this_week:
                 out_player = player_lookup.get(transfer.get('element_out'))
@@ -899,7 +915,9 @@ async def captains(interaction: discord.Interaction):
         captain_info = []
         for i, picks_data in enumerate(all_picks_data):
             if picks_data and 'picks' in picks_data:
-                manager_name = league_data['standings']['results'][i]['player_name']
+                manager_entry = league_data['standings']['results'][i]
+                manager_name = manager_entry['player_name']
+                manager_id = manager_entry['entry']
                 
                 # Find the captain (is_captain = True)
                 captain_pick = None
@@ -912,12 +930,13 @@ async def captains(interaction: discord.Interaction):
                     captain_id = captain_pick['element']
                     captain_player_info = all_players[captain_id]
                     captain_name = f"{captain_player_info['first_name']} {captain_player_info['second_name']}"
-                    captain_info.append((manager_name, captain_name))
+                    captain_info.append((manager_name, manager_id, captain_name))
         
         if captain_info:
             response = f"**Captain choices for GW {current_gw}:**\n\n"
-            for manager_name, captain_name in captain_info:
-                response += f"{manager_name} - **{captain_name}**\n"
+            for manager_name, manager_id, captain_name in captain_info:
+                manager_link = format_manager_link(manager_name, manager_id, current_gw)
+                response += f"{manager_link} - **{captain_name}**\n"
         else:
             response = "No captain information found for the current gameweek."
         
