@@ -142,6 +142,34 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
 
 # --- IMAGE GENERATION LOGIC ---
 
+def format_player_price(player):
+    """Return player's price as £X.Xm string."""
+    return f"£{player.get('now_cost', 0) / 10:.1f}m"
+
+
+async def get_manager_transfer_activity(session, manager_entry_id, gameweek):
+    """Fetch transfer, chip, and cost info for a manager for the given gameweek."""
+    transfers_task = fetch_fpl_api(session, f"{BASE_API_URL}entry/{manager_entry_id}/transfers/")
+    picks_task = fetch_fpl_api(session, f"{BASE_API_URL}entry/{manager_entry_id}/event/{gameweek}/picks/")
+    transfers_data, picks_data = await asyncio.gather(transfers_task, picks_task)
+
+    if transfers_data is None or picks_data is None:
+        return None
+
+    transfers_this_week = [t for t in transfers_data if t.get("event") == gameweek]
+    transfers_this_week.sort(key=lambda t: t.get("time", ""))
+
+    chip = picks_data.get("active_chip")
+    entry_history = picks_data.get("entry_history", {})
+    transfer_cost = entry_history.get("event_transfers_cost", 0)
+
+    return {
+        "transfers": transfers_this_week,
+        "chip": chip,
+        "transfer_cost": transfer_cost
+    }
+
+
 def calculate_player_coordinates(picks, all_players):
     starters = [p for p in picks if p['position'] <= 11]
     bench = [p for p in picks if p['position'] > 11]
@@ -223,7 +251,7 @@ def generate_team_image(fpl_data, summary_data):
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
         draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
-        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=(0, 135, 81, 150))
+        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill="#015030")
         draw.text((x - name_bbox[2] / 2, name_box_y - 4), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
@@ -255,7 +283,7 @@ def generate_team_image(fpl_data, summary_data):
         draw.text((x_pos, y_pos), text, font=summary_font, fill="white", stroke_width=1, stroke_fill="black")
 
     img_byte_arr = io.BytesIO()
-    background.save(img_byte_arr, format='PNG')
+    background.convert("RGB").save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
     return img_byte_arr
 
@@ -406,7 +434,7 @@ def generate_dreamteam_image(fpl_data, summary_data):
         draw.text((name_x, potw_y + 75), f"Goals: {potw_data['goals']}, Assists: {potw_data['assists']}", font=potw_font, fill="black")
 
     img_byte_arr = io.BytesIO()
-    background.save(img_byte_arr, format='PNG')
+    background.convert("RGB").save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
     return img_byte_arr
 
@@ -754,6 +782,86 @@ async def dreamteam(interaction: discord.Interaction):
             await interaction.followup.send(f"🌟 **Dream Team for GW {last_completed_gw}** 🌟", file=file)
         else:
             await interaction.followup.send("Sorry, there was an error creating the dream team image.")
+
+@bot.tree.command(name="transfers", description="Lists all transfers made by league managers for the current gameweek.")
+async def transfers(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    async with aiohttp.ClientSession() as session:
+        current_gw = await get_current_gameweek(session)
+        if not current_gw:
+            await interaction.followup.send("Could not determine the current gameweek.")
+            return
+
+        bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
+        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/")
+
+        if not bootstrap_data or not league_data:
+            await interaction.followup.send("Failed to fetch FPL league data. Please try again later.")
+            return
+
+        player_lookup = {p['id']: p for p in bootstrap_data['elements']}
+        managers = league_data['standings']['results']
+
+        tasks = [
+            get_manager_transfer_activity(session, manager['entry'], current_gw)
+            for manager in managers
+        ]
+        manager_transfer_data = await asyncio.gather(*tasks)
+
+        chip_labels = {
+            "wildcard": "Wildcard 🪙",
+            "freehit": "Free Hit 🪙"
+        }
+
+        lines = [f"**Gameweek {current_gw} Transfers**", ""]
+        for manager, data in zip(managers, manager_transfer_data):
+            manager_name = manager['player_name']
+            team_name = manager['entry_name']
+
+            if data is None:
+                lines.append(f"{manager_name} - {team_name}:")
+                lines.append("    Unable to retrieve transfer data.")
+                continue
+
+            status_tokens = []
+            chip_label = chip_labels.get(data['chip'])
+            if chip_label:
+                status_tokens.append(chip_label)
+            if data['transfer_cost']:
+                status_tokens.append(f"-{data['transfer_cost']} pts")
+
+            suffix = f" ({', '.join(status_tokens)})" if status_tokens else ""
+            transfers_this_week = data['transfers']
+            if not transfers_this_week and not status_tokens:
+                continue
+
+            lines.append(f"**{manager_name} - {team_name}{suffix}**")
+
+            for transfer in transfers_this_week:
+                out_player = player_lookup.get(transfer.get('element_out'))
+                in_player = player_lookup.get(transfer.get('element_in'))
+
+                out_name = out_player['web_name'] if out_player else "Unknown"
+                in_name = in_player['web_name'] if in_player else "Unknown"
+
+                out_cost = transfer.get('element_out_cost')
+                in_cost = transfer.get('element_in_cost')
+
+                if out_cost is None and out_player:
+                    out_cost = out_player.get('now_cost')
+                if in_cost is None and in_player:
+                    in_cost = in_player.get('now_cost')
+
+                out_price = f"£{(out_cost or 0) / 10:.1f}m"
+                in_price = f"£{(in_cost or 0) / 10:.1f}m"
+
+                lines.append(f"    ❌ {out_name} ({out_price}) ➜ ✅ {in_name} ({in_price})")
+            lines.append("")
+
+        message = "\n".join(lines)
+        await interaction.followup.send(message)
+
 
 @bot.tree.command(name="captains", description="Shows which player each manager captained for the current gameweek.")
 async def captains(interaction: discord.Interaction):
