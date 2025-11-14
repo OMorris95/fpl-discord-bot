@@ -3,17 +3,74 @@ from discord import app_commands
 from discord.ext import commands
 import aiohttp
 import os
+import json
+from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import io
 import asyncio
 from dotenv import load_dotenv
+from typing import Literal
 
 # Load environment variables from .env file
 load_dotenv()
 
 # --- CONFIGURATION ---
-FPL_LEAGUE_ID = os.getenv("FPL_LEAGUE_ID")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+CONFIG_PATH = Path("config/league_config.json")
+
+
+def load_league_config():
+    if CONFIG_PATH.exists():
+        try:
+            with CONFIG_PATH.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"guilds": {}, "channels": {}}
+
+
+def save_league_config():
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CONFIG_PATH.open("w", encoding="utf-8") as f:
+        json.dump(league_config, f, indent=2)
+
+
+league_config = load_league_config()
+
+
+def set_league_mapping(scope: str, scope_id: int, league_id: int):
+    key = "channels" if scope == "channel" else "guilds"
+    league_config.setdefault(key, {})
+    league_config[key][str(scope_id)] = {"league_id": str(league_id)}
+    save_league_config()
+
+
+def get_configured_league_id(channel_id: int | None, guild_id: int | None):
+    if channel_id is not None:
+        channel_entry = league_config.get("channels", {}).get(str(channel_id))
+        if channel_entry and channel_entry.get("league_id"):
+            return channel_entry["league_id"]
+    if guild_id is not None:
+        guild_entry = league_config.get("guilds", {}).get(str(guild_id))
+        if guild_entry and guild_entry.get("league_id"):
+            return guild_entry["league_id"]
+    return None
+
+
+async def ensure_league_id(interaction: discord.Interaction):
+    league_id = get_configured_league_id(interaction.channel_id, getattr(interaction, "guild_id", None))
+    if league_id:
+        return league_id
+
+    await interaction.followup.send(
+        "No league is configured for this channel or server. "
+        "An admin can set one with `/setleague`."
+    )
+    return None
+
+
+def get_league_id_for_context(interaction: discord.Interaction):
+    return get_configured_league_id(interaction.channel_id, getattr(interaction, "guild_id", None))
 
 # --- FILE PATHS ---
 BACKGROUND_IMAGE_PATH = "pitch-graphic-t77-OTdp.png"
@@ -83,9 +140,9 @@ async def get_last_completed_gameweek(session):
             return max(completed_events, key=lambda x: x['id'])['id']
     return None
 
-async def get_league_managers(session):
-    """Fetches all manager names and IDs for the configured league."""
-    league_url = f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/"
+async def get_league_managers(session, league_id):
+    """Fetches all manager names and IDs for the specified league."""
+    league_url = f"{BASE_API_URL}leagues-classic/{league_id}/standings/"
     league_data = await fetch_fpl_api(session, league_url)
     if league_data and 'standings' in league_data and 'results' in league_data['standings']:
         return {
@@ -459,6 +516,43 @@ def generate_dreamteam_image(fpl_data, summary_data):
 
 # --- DISCORD SLASH COMMANDS ---
 
+@bot.tree.command(name="setleague", description="Configure which FPL league this server or channel uses.")
+@app_commands.describe(league_id="The FPL league ID (numbers only).",
+                       scope="Apply this league to the whole server or just this channel.")
+@app_commands.choices(scope=[
+    app_commands.Choice(name="Server-wide (default)", value="server"),
+    app_commands.Choice(name="This channel only", value="channel")
+])
+async def setleague(interaction: discord.Interaction, league_id: int, scope: str = "server"):
+    await interaction.response.defer(ephemeral=True)
+
+    if not interaction.guild:
+        await interaction.followup.send("This command can only be used inside a server.")
+        return
+
+    scope_value = scope or "server"
+    permissions = interaction.user.guild_permissions
+    has_permission = permissions.manage_guild if scope_value == "server" else permissions.manage_channels
+    if not has_permission:
+        required = "Manage Server" if scope_value == "server" else "Manage Channels"
+        await interaction.followup.send(f"You need the **{required}** permission to set the league in this scope.")
+        return
+
+    async with aiohttp.ClientSession() as session:
+        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{league_id}/standings/")
+
+    if not league_data or "league" not in league_data:
+        await interaction.followup.send("Could not verify that league ID. Please double-check the number and try again.")
+        return
+
+    target_id = interaction.guild_id if scope_value == "server" else interaction.channel_id
+    set_league_mapping(scope_value, target_id, league_id)
+
+    location = "this server" if scope_value == "server" else f"{interaction.channel.mention}"
+    league_name = league_data['league']['name']
+    await interaction.followup.send(f"League set to **{league_name}** ({league_id}) for {location}.")
+
+
 @bot.tree.command(name="team", description="Generates an image of a manager's current FPL team.")
 @app_commands.describe(manager="Select the manager's team to view.")
 async def team(interaction: discord.Interaction, manager: str):
@@ -466,6 +560,10 @@ async def team(interaction: discord.Interaction, manager: str):
     manager_id = int(manager)
 
     async with aiohttp.ClientSession() as session:
+        league_id = await ensure_league_id(interaction)
+        if not league_id:
+            return
+
         current_gw = await get_current_gameweek(session)
         if not current_gw:
             await interaction.followup.send("Could not determine the current gameweek.")
@@ -473,7 +571,7 @@ async def team(interaction: discord.Interaction, manager: str):
 
         bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
         live_data = await fetch_fpl_api(session, f"{BASE_API_URL}event/{current_gw}/live/")
-        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/")
+        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{league_id}/standings/")
 
         if not all([bootstrap_data, live_data, league_data]):
             await interaction.followup.send("Failed to fetch essential FPL data. Please try again later.")
@@ -521,8 +619,12 @@ async def team(interaction: discord.Interaction, manager: str):
 
 @team.autocomplete('manager')
 async def team_autocomplete(interaction: discord.Interaction, current: str):
+    league_id = get_league_id_for_context(interaction)
+    if not league_id:
+        return []
+
     async with aiohttp.ClientSession() as session:
-        managers = await get_league_managers(session)
+        managers = await get_league_managers(session, league_id)
         choices = [app_commands.Choice(name=name, value=str(id)) for name, id in managers.items() if current.lower() in name.lower()]
         return choices[:25]
 
@@ -531,12 +633,16 @@ async def table(interaction: discord.Interaction):
     await interaction.response.defer()
 
     async with aiohttp.ClientSession() as session:
+        league_id = await ensure_league_id(interaction)
+        if not league_id:
+            return
+
         current_gw = await get_current_gameweek(session)
         if not current_gw:
             await interaction.followup.send("Could not determine the current gameweek.")
             return
             
-        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/")
+        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{league_id}/standings/")
         live_data = await fetch_fpl_api(session, f"{BASE_API_URL}event/{current_gw}/live/")
 
         if not league_data or not live_data:
@@ -569,13 +675,17 @@ async def player(interaction: discord.Interaction, player: str):
     player_id = int(player)
 
     async with aiohttp.ClientSession() as session:
+        league_id = await ensure_league_id(interaction)
+        if not league_id:
+            return
+
         current_gw = await get_current_gameweek(session)
         if not current_gw:
             await interaction.followup.send("Could not determine the current gameweek.")
             return
 
         bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
-        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/")
+        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{league_id}/standings/")
 
         if not bootstrap_data or not league_data:
             await interaction.followup.send("Failed to fetch FPL data. Please try again later.")
@@ -716,6 +826,10 @@ async def dreamteam(interaction: discord.Interaction):
     await interaction.response.defer()
     
     async with aiohttp.ClientSession() as session:
+        league_id = await ensure_league_id(interaction)
+        if not league_id:
+            return
+
         last_completed_gw = await get_last_completed_gameweek(session)
         if not last_completed_gw:
             await interaction.followup.send("Could not determine the last completed gameweek.")
@@ -723,7 +837,7 @@ async def dreamteam(interaction: discord.Interaction):
 
         # Fetch required data
         bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
-        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/")
+        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{league_id}/standings/")
         completed_gw_data = await fetch_fpl_api(session, f"{BASE_API_URL}event/{last_completed_gw}/live/")
 
         if not all([bootstrap_data, league_data, completed_gw_data]):
@@ -807,13 +921,17 @@ async def transfers(interaction: discord.Interaction):
     await interaction.response.defer()
 
     async with aiohttp.ClientSession() as session:
+        league_id = await ensure_league_id(interaction)
+        if not league_id:
+            return
+
         current_gw = await get_current_gameweek(session)
         if not current_gw:
             await interaction.followup.send("Could not determine the current gameweek.")
             return
 
         bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
-        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/")
+        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{league_id}/standings/")
 
         if not bootstrap_data or not league_data:
             await interaction.followup.send("Failed to fetch FPL league data. Please try again later.")
@@ -890,13 +1008,17 @@ async def captains(interaction: discord.Interaction):
     await interaction.response.defer()
 
     async with aiohttp.ClientSession() as session:
+        league_id = await ensure_league_id(interaction)
+        if not league_id:
+            return
+
         current_gw = await get_current_gameweek(session)
         if not current_gw:
             await interaction.followup.send("Could not determine the current gameweek.")
             return
 
         bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
-        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{FPL_LEAGUE_ID}/standings/")
+        league_data = await fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{league_id}/standings/")
 
         if not bootstrap_data or not league_data:
             await interaction.followup.send("Failed to fetch FPL data. Please try again later.")
@@ -946,7 +1068,5 @@ async def captains(interaction: discord.Interaction):
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
         print("!!! ERROR: DISCORD_BOT_TOKEN not found in .env file. Please create a .env file with your bot token.")
-    elif not FPL_LEAGUE_ID:
-        print("!!! ERROR: FPL_LEAGUE_ID not found in .env file. Please create a .env file with your league ID.")
     else:
         bot.run(DISCORD_BOT_TOKEN)
