@@ -140,6 +140,7 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
     }
 
 # --- IMAGE GENERATION LOGIC ---
+
 def calculate_player_coordinates(picks, all_players):
     starters = [p for p in picks if p['position'] <= 11]
     bench = [p for p in picks if p['position'] > 11]
@@ -162,12 +163,18 @@ def calculate_player_coordinates(picks, all_players):
 
 def generate_team_image(fpl_data, summary_data):
     try:
-        background = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
+        pitch = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
+        base_layer = Image.new("RGBA", pitch.size, "#1A1A1E")
+        background = Image.alpha_composite(base_layer, pitch)
         draw = ImageDraw.Draw(background)
         name_font = ImageFont.truetype(FONT_PATH, NAME_FONT_SIZE)
         points_font = ImageFont.truetype(FONT_PATH, POINTS_FONT_SIZE)
         captain_font = ImageFont.truetype(FONT_PATH, CAPTAIN_FONT_SIZE)
         summary_font = ImageFont.truetype(FONT_PATH, SUMMARY_FONT_SIZE)
+        name_sample_bbox = draw.textbbox((0, 0), "Agjpqy", font=name_font)
+        points_sample_bbox = draw.textbbox((0, 0), "Agjpqy 0123456789", font=points_font)
+        fixed_name_box_height = (name_sample_bbox[3] - name_sample_bbox[1]) + 4
+        fixed_points_box_height = (points_sample_bbox[3] - points_sample_bbox[1]) + 4
     except Exception as e:
         print(f"Error loading resources: {e}")
         return None
@@ -206,10 +213,10 @@ def generate_team_image(fpl_data, summary_data):
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
         box_width = max(name_bbox[2], points_bbox[2]) + 10
-        name_box_height = (name_bbox[3] - name_bbox[1]) + 4
+        name_box_height = fixed_name_box_height
         name_box_x = x - box_width // 2
         name_box_y = y + 55
-        points_box_height = (points_bbox[3] - points_bbox[1]) + 4
+        points_box_height = fixed_points_box_height
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
         draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
@@ -223,6 +230,20 @@ def generate_team_image(fpl_data, summary_data):
             draw.text((paste_x + 80, paste_y - 5), "V", font=captain_font, fill="black", stroke_width=2, stroke_fill="white")
 
     summary_strings = [f"League Rank: {summary_data['rank']}", f"GW Points: {summary_data['gw_points']}", f"Total Points: {summary_data['total_points']}"]
+    summary_text_width = 0
+    for text in summary_strings:
+        bbox = draw.textbbox((0, 0), text, font=summary_font)
+        summary_text_width = max(summary_text_width, bbox[2] - bbox[0])
+    summary_padding = 20
+    summary_padding_y = 5
+    summary_box = [
+        SUMMARY_X - summary_text_width - summary_padding,
+        SUMMARY_Y_START - summary_padding_y,
+        SUMMARY_X + 10,
+        SUMMARY_Y_START + len(summary_strings) * SUMMARY_LINE_SPACING + summary_padding_y
+    ]
+    draw.rounded_rectangle(summary_box, radius=16, fill="#6625ff")
+
     for i, text in enumerate(summary_strings):
         y_pos = SUMMARY_Y_START + (i * SUMMARY_LINE_SPACING)
         text_bbox = draw.textbbox((0, 0), text, font=summary_font)
@@ -238,12 +259,18 @@ def generate_team_image(fpl_data, summary_data):
 def generate_dreamteam_image(fpl_data, summary_data):
     """Generate dream team image with Player of the Week graphic."""
     try:
-        background = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
+        pitch = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
+        base_layer = Image.new("RGBA", pitch.size, "#1A1A1E")
+        background = Image.alpha_composite(base_layer, pitch)
         draw = ImageDraw.Draw(background)
         name_font = ImageFont.truetype(FONT_PATH, NAME_FONT_SIZE)
         points_font = ImageFont.truetype(FONT_PATH, POINTS_FONT_SIZE)
         summary_font = ImageFont.truetype(FONT_PATH, SUMMARY_FONT_SIZE)
         potw_font = ImageFont.truetype(FONT_PATH, 20)  # Player of the Week font
+        name_sample_bbox = draw.textbbox((0, 0), "Agjpqy", font=name_font)
+        points_sample_bbox = draw.textbbox((0, 0), "Agjpqy 0123456789", font=points_font)
+        fixed_name_box_height = (name_sample_bbox[3] - name_sample_bbox[1]) + 4
+        fixed_points_box_height = (points_sample_bbox[3] - points_sample_bbox[1]) + 4
     except Exception as e:
         print(f"Error loading resources: {e}")
         return None
@@ -283,10 +310,10 @@ def generate_dreamteam_image(fpl_data, summary_data):
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
         box_width = max(name_bbox[2], points_bbox[2]) + 10
-        name_box_height = (name_bbox[3] - name_bbox[1]) + 4
+        name_box_height = fixed_name_box_height
         name_box_x = x - box_width // 2
         name_box_y = y + 55
-        points_box_height = (points_bbox[3] - points_bbox[1]) + 4
+        points_box_height = fixed_points_box_height
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
         draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
@@ -296,6 +323,20 @@ def generate_dreamteam_image(fpl_data, summary_data):
 
     # Draw summary info (modified for dream team)
     summary_strings = [f"Dream Team", f"Total: {summary_data['total_points']} pts", f"Gameweek {summary_data['gameweek']}"]
+    dream_text_width = 0
+    for text in summary_strings:
+        bbox = draw.textbbox((0, 0), text, font=summary_font)
+        dream_text_width = max(dream_text_width, bbox[2] - bbox[0])
+    dream_padding = 20
+    dream_padding_y = 5
+    dream_box = [
+        SUMMARY_X - dream_text_width - dream_padding,
+        SUMMARY_Y_START - dream_padding_y,
+        SUMMARY_X + 10,
+        SUMMARY_Y_START + len(summary_strings) * SUMMARY_LINE_SPACING + dream_padding_y
+    ]
+    draw.rounded_rectangle(dream_box, radius=16, fill="#6625ff")
+
     for i, text in enumerate(summary_strings):
         y_pos = SUMMARY_Y_START + (i * SUMMARY_LINE_SPACING)
         text_bbox = draw.textbbox((0, 0), text, font=summary_font)
@@ -334,8 +375,8 @@ def generate_dreamteam_image(fpl_data, summary_data):
     # Draw POTW background box
     potw_box_width = 220  # Made wider to fit "Player of the Week" text
     potw_box_height = 110
-    draw.rounded_rectangle([potw_x, potw_y, potw_x + potw_box_width, potw_y + potw_box_height], 
-                          radius=10, fill=(255, 215, 0, 200))  # Gold background
+    potw_box = [potw_x, potw_y, potw_x + potw_box_width, potw_y + potw_box_height]
+    draw.rounded_rectangle(potw_box, radius=14, fill="#ffd700")
     
     # Draw "Player of the Week" title
     title_text = "Player of the Week"

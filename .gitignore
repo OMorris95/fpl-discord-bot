@@ -3,3 +3,5 @@ team_jerseys/
 __pycache__/
 venv/
 .env
+requirements.txt
+deploy.bat
