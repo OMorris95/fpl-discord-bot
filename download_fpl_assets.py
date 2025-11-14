@@ -48,7 +48,8 @@ def download_images():
         if not all([player_code, player_name, player_id]):
             continue
         
-        filename = f"{player_name}_{player_id}.png"
+        safe_player_name = player_name.replace(' ', '_')
+        filename = f"{safe_player_name}_{player_id}.png"
         filepath = os.path.join(HEADSHOTS_DIR, filename)
         
         if os.path.exists(filepath):

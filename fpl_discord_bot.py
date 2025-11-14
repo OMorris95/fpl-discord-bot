@@ -33,6 +33,7 @@ GK_Y, DEF_Y, MID_Y, FWD_Y = 65, 265, 465, 665
 BENCH_X, BENCH_Y_START, BENCH_Y_SPACING = 120, 65, 180
 SUMMARY_X, SUMMARY_Y_START, SUMMARY_LINE_SPACING = 1300, 40, 35
 NAME_FONT_SIZE, POINTS_FONT_SIZE, CAPTAIN_FONT_SIZE, SUMMARY_FONT_SIZE = 22, 20, 22, 24
+POINTS_BOX_EXTRA_PADDING = 4
 
 
 class FPLBot(commands.Bot):
@@ -161,6 +162,8 @@ def calculate_player_coordinates(picks, all_players):
         coords[p['element']] = (BENCH_X, BENCH_Y_START + (i * BENCH_Y_SPACING))
     return coords
 
+POINTS_BOX_EXTRA_PADDING = 4
+
 def generate_team_image(fpl_data, summary_data):
     try:
         pitch = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
@@ -216,7 +219,7 @@ def generate_team_image(fpl_data, summary_data):
         name_box_height = fixed_name_box_height
         name_box_x = x - box_width // 2
         name_box_y = y + 55
-        points_box_height = fixed_points_box_height
+        points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
         draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
@@ -313,7 +316,7 @@ def generate_dreamteam_image(fpl_data, summary_data):
         name_box_height = fixed_name_box_height
         name_box_x = x - box_width // 2
         name_box_y = y + 55
-        points_box_height = fixed_points_box_height
+        points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
         draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
@@ -464,7 +467,8 @@ async def team(interaction: discord.Interaction, manager: str):
         image_bytes = generate_team_image(fpl_data_for_image, summary_data)
         if image_bytes:
             file = discord.File(fp=image_bytes, filename="fpl_team.png")
-            await interaction.followup.send(file=file)
+            manager_name = selected_manager_details.get('name', 'Manager')
+            await interaction.followup.send(f"**{manager_name}'s Team for GW {current_gw}**", file=file)
         else:
             await interaction.followup.send("Sorry, there was an error creating the team image.")
 
