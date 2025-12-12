@@ -1044,7 +1044,6 @@ async def dreamteam(interaction: discord.Interaction):
         }
         
         # Generate image
-        image_bytes = generate_dreamteam_image(fpl_data_for_image, summary_data)
         image_bytes = await asyncio.to_thread(generate_dreamteam_image, fpl_data_for_image, summary_data)
         if image_bytes:
             file = discord.File(fp=image_bytes, filename="fpl_dreamteam.png")
