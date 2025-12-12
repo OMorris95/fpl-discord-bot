@@ -172,8 +172,8 @@ async def get_last_completed_gameweek(session):
 
 async def get_league_managers(session, league_id):
     """Fetches all manager names and IDs for the specified league."""
-    league_url = f"{BASE_API_URL}leagues-classic/{league_id}/standings/"
-    league_data = await fetch_fpl_api(session, league_url, cache_key=f"league_{league_id}_standings")
+    league_url = f"{BASE_API_URL}leagues-classic/{league_id}/standings/?page_standings=1"
+    league_data = await fetch_fpl_api(session, league_url, cache_key=f"league_{league_id}_standings_p1")
     if league_data and 'standings' in league_data and 'results' in league_data['standings']:
         return {
             manager['player_name']: manager['entry']
@@ -678,7 +678,7 @@ async def team(interaction: discord.Interaction, manager: str):
             "picks": selected_manager_details['picks_data']
         }
         
-        image_bytes = generate_team_image(fpl_data_for_image, summary_data)
+        image_bytes = await asyncio.to_thread(generate_team_image, fpl_data_for_image, summary_data)
         if image_bytes:
             file = discord.File(fp=image_bytes, filename="fpl_team.png")
             manager_name = selected_manager_details.get('name', 'Manager')
@@ -1045,6 +1045,7 @@ async def dreamteam(interaction: discord.Interaction):
         
         # Generate image
         image_bytes = generate_dreamteam_image(fpl_data_for_image, summary_data)
+        image_bytes = await asyncio.to_thread(generate_dreamteam_image, fpl_data_for_image, summary_data)
         if image_bytes:
             file = discord.File(fp=image_bytes, filename="fpl_dreamteam.png")
             await interaction.followup.send(f"🌟 **Dream Team for GW {last_completed_gw}** 🌟", file=file)
