@@ -125,6 +125,7 @@ class FPLBot(commands.Bot):
 
     async def setup_hook(self):
         self.session = aiohttp.ClientSession()
+        self.api_semaphore = asyncio.Semaphore(10)
         await self.tree.sync()
         print(f"Synced slash commands for {self.user}.")
 
@@ -161,6 +162,23 @@ async def fetch_fpl_api(session, url, cache_key=None, cache_gw=None, force_refre
             else:
                 print(f"Error fetching {url}: Status {response.status}")
                 return None
+        sem = getattr(bot, "api_semaphore", None)
+        if sem:
+            await sem.acquire()
+        try:
+            async with session.get(url, headers=REQUEST_HEADERS) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if cache_path and not force_refresh:
+                        payload = {"data": data, "gameweek": cache_gw}
+                        await save_cached_json(cache_path, payload)
+                    return data
+                else:
+                    print(f"Error fetching {url}: Status {response.status}")
+                    return None
+        finally:
+            if sem:
+                sem.release()
     except aiohttp.ClientError as e:
         print(f"Request error for {url}: {e}")
         return None
