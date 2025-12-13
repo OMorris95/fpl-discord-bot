@@ -5,3 +5,5 @@ venv/
 .env
 requirements.txt
 deploy.bat
+cache/
+config/
