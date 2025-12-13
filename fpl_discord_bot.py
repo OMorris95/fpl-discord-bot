@@ -816,13 +816,10 @@ async def table(interaction: discord.Interaction):
     table_content += "```"
     message = f"{header}\n{table_content}"
 
-    remaining = len(manager_details) - TABLE_LIMIT
-    if remaining > 0:
+    has_next_page = league_data['standings'].get('has_next', False)
+    if len(manager_details) > TABLE_LIMIT or has_next_page:
         league_url = f"https://fantasy.premierleague.com/leagues/{league_id}/standings/c"
-        message += (
-            f"\n{remaining} more manager{'s' if remaining != 1 else ''} — "
-            f"view the full table at <{league_url}>"
-        )
+        message += f"\nView the full table at <{league_url}>"
 
     await interaction.followup.send(message)
 
