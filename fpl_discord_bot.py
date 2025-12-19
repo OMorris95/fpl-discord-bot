@@ -78,6 +78,23 @@ def init_database():
                 UNIQUE (guild_id, fpl_team_id)
             )
         """)
+
+        # Create and migrate goal_subscriptions table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS goal_subscriptions (
+                channel_id TEXT PRIMARY KEY,
+                league_id INTEGER NOT NULL,
+                transfer_alerts_enabled BOOLEAN NOT NULL DEFAULT 0
+            )
+        """)
+        # This handles migration for older versions that didn't have the new column
+        cur.execute("PRAGMA table_info(goal_subscriptions)")
+        columns = [row[1] for row in cur.fetchall()]
+        if 'transfer_alerts_enabled' not in columns:
+            print("Migrating goal_subscriptions table for transfer alerts...")
+            cur.execute("ALTER TABLE goal_subscriptions ADD COLUMN transfer_alerts_enabled BOOLEAN NOT NULL DEFAULT 0")
+            print("Migration complete.")
+
         con.commit()
 
 
@@ -211,10 +228,26 @@ def remove_goal_subscription(channel_id: int):
 def get_all_goal_subscriptions():
     """Gets all channel IDs and their league IDs subscribed to goal alerts."""
     with sqlite3.connect(DB_PATH) as con:
+        con.row_factory = sqlite3.Row
         cur = con.cursor()
-        # Return as a dictionary for easy league_id lookup
-        cur.execute("SELECT channel_id, league_id FROM goal_subscriptions")
-        return {row[0]: row[1] for row in cur.fetchall()}
+        cur.execute("SELECT channel_id, league_id, transfer_alerts_enabled FROM goal_subscriptions")
+        return cur.fetchall()
+
+
+def is_transfer_alert_subscribed(channel_id: int):
+    """Checks if a channel is subscribed to transfer flop alerts."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        cur.execute("SELECT transfer_alerts_enabled FROM goal_subscriptions WHERE channel_id = ?", (str(channel_id),))
+        result = cur.fetchone()
+        return result[0] if result and result[0] else False
+
+def set_transfer_alert_subscription(channel_id: int, status: bool):
+    """Sets the transfer alert subscription status for a channel."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        cur.execute("UPDATE goal_subscriptions SET transfer_alerts_enabled = ? WHERE channel_id = ?", (status, str(channel_id)))
+        con.commit()
 
 
 def _load_cached_json_sync(path: Path):
@@ -303,6 +336,7 @@ class FPLBot(commands.Bot):
         self.session = None
         self.last_known_goals = {}
         self.picks_cache = {} # Cache for manager picks
+        self.transfers_cache = {} # Cache for manager transfers
         self.live_fpl_data = None # In-memory cache for live GW data
 
     async def setup_hook(self):
@@ -388,34 +422,65 @@ class FPLBot(commands.Bot):
                 opponent_name = opponent_team['name'] if opponent_team else "Unknown"
                 player_team = next((t for t in bootstrap_data.get('teams', []) if t['id'] == team_id), None)
 
-                for channel_id, league_id in (await asyncio.to_thread(get_all_goal_subscriptions)).items():
-                    channel = self.get_channel(int(channel_id))
+                # --- Find owners and broadcast ---
+                for sub in (await asyncio.to_thread(get_all_goal_subscriptions)):
+                    channel = self.get_channel(int(sub['channel_id']))
                     if not channel or not channel.guild: continue
 
+                    goal_alerts_on = True # This is implied by being in the table
+                    transfer_alerts_on = sub['transfer_alerts_enabled']
+                    league_id = sub['league_id']
+
+                    # --- Caching ---
+                    # Ensure picks and transfers are cached for this league and GW
                     if self.picks_cache.get('gw') != current_gw or league_id not in self.picks_cache:
                         self.picks_cache = {'gw': current_gw, league_id: {}}
+                        self.transfers_cache = {'gw': current_gw, league_id: {}}
                         linked_users = await asyncio.to_thread(get_linked_users, channel.guild.id, league_id)
-                        for user in linked_users:
-                            picks = await fetch_fpl_api(self.session, f"{BASE_API_URL}entry/{user['fpl_team_id']}/event/{current_gw}/picks/")
-                            if picks:
-                                self.picks_cache[league_id][user['discord_user_id']] = picks
+                        
+                        async def fetch_manager_data(user):
+                            picks, transfers = await asyncio.gather(
+                                fetch_fpl_api(self.session, f"{BASE_API_URL}entry/{user['fpl_team_id']}/event/{current_gw}/picks/"),
+                                fetch_fpl_api(self.session, f"{BASE_API_URL}entry/{user['fpl_team_id']}/transfers/")
+                            )
+                            if picks: self.picks_cache[league_id][user['discord_user_id']] = picks
+                            if transfers: self.transfers_cache[league_id][user['discord_user_id']] = transfers
+                        
+                        await asyncio.gather(*[fetch_manager_data(u) for u in linked_users])
+
+                    # --- Logic ---
+                    owners, benched, transferors = [], [], []
                     
-                    owners, benched = [], []
+                    # Find owners
                     for user_id, picks in self.picks_cache.get(league_id, {}).items():
                         for pick in picks.get('picks', []):
                             if pick['element'] == player_id:
                                 if pick['position'] <= 11: owners.append(f"<@{user_id}>")
                                 else: benched.append(f"<@{user_id}>")
                     
-                    embed = discord.Embed(
-                        title=f"⚽ GOAL: {player_info['web_name']} ({player_team['short_name']})",
-                        description=f"Scored {goals_scored} goal(s) against **{opponent_name}**!",
-                        color=discord.Color.green()
-                    )
-                    if owners: embed.add_field(name="Owned By", value=", ".join(owners))
-                    if benched: embed.add_field(name="Benched By (🤡)", value=", ".join(benched))
+                    # Find transferors if alert is enabled
+                    if transfer_alerts_on:
+                        for user_id, transfers in self.transfers_cache.get(league_id, {}).items():
+                            # Check transfers for the current gameweek
+                            for transfer in [t for t in transfers if t.get('event') == current_gw]:
+                                if transfer['element_out'] == player_id:
+                                    transferors.append(f"<@{user_id}>")
                     
-                    await channel.send(embed=embed)
+                    # --- Send Message ---
+                    if (goal_alerts_on and (owners or benched)) or (transfer_alerts_on and transferors):
+                        embed = discord.Embed(
+                            title=f"⚽ GOAL: {player_info['web_name']} ({player_team['short_name']})",
+                            description=f"Scored {goals_scored} goal(s) against **{opponent_name}**!",
+                            color=discord.Color.green()
+                        )
+                        if goal_alerts_on:
+                            if owners: embed.add_field(name="Owned By", value=", ".join(owners), inline=False)
+                            if benched: embed.add_field(name="Benched By (🤡)", value=", ".join(benched), inline=False)
+                        
+                        if transfer_alerts_on and transferors:
+                            embed.add_field(name="🤣 Transferred Out By", value=", ".join(transferors), inline=False)
+                        
+                        await channel.send(embed=embed)
 
     async def close(self):
         if self.session:
@@ -1038,6 +1103,35 @@ async def toggle_goals(interaction: discord.Interaction):
 
 @toggle_goals.error
 async def toggle_goals_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("You need the `Manage Channels` permission to use this command.", ephemeral=True)
+    else:
+        await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
+        raise error
+
+
+@bot.tree.command(name="toggle_transfer_alerts", description="Enable or disable transfer flop alerts in this channel.")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def toggle_transfer_alerts(interaction: discord.Interaction):
+    """Toggles transfer flop alerts for the current channel."""
+    await interaction.response.defer(ephemeral=True)
+
+    # This alert depends on the goal subscription, so check that first
+    if not await asyncio.to_thread(is_goal_subscribed, interaction.channel_id):
+        await interaction.followup.send("Goal alerts must be enabled first with `/toggle_goals` before you can enable this.", ephemeral=True)
+        return
+
+    is_subscribed = await asyncio.to_thread(is_transfer_alert_subscribed, interaction.channel_id)
+    
+    if is_subscribed:
+        await asyncio.to_thread(set_transfer_alert_subscription, interaction.channel_id, False)
+        await interaction.followup.send("🔴 Transfer flop alerts disabled for this channel.")
+    else:
+        await asyncio.to_thread(set_transfer_alert_subscription, interaction.channel_id, True)
+        await interaction.followup.send("🟢 Transfer flop alerts enabled for this channel.")
+
+@toggle_transfer_alerts.error
+async def toggle_transfer_alerts_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("You need the `Manage Channels` permission to use this command.", ephemeral=True)
     else:
