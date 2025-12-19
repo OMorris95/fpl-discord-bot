@@ -325,12 +325,21 @@ class FPLBot(commands.Bot):
                 return
 
             live_event = next((event for event in bootstrap_data['events'] if event['is_current']), None)
-            if not live_event or not live_event.get('data_checked'):
-                self.live_fpl_data = None # No live gameweek
+            
+            if not live_event or live_event.get('finished', False) or not live_event.get('data_checked', False):
+                if self.live_fpl_data is not None:
+                    print("Gameweek is no longer live. Clearing live data cache.")
+                    self.live_fpl_data = None
                 return
             
             current_gw = live_event['id']
-            self.live_fpl_data = await fetch_fpl_api(self.session, f"{BASE_API_URL}event/{current_gw}/live/")
+            live_data = await fetch_fpl_api(self.session, f"{BASE_API_URL}event/{current_gw}/live/")
+            if live_data:
+                live_data['gw'] = current_gw
+                live_data['is_finished'] = live_event.get('finished', False)
+                self.live_fpl_data = live_data
+            else:
+                self.live_fpl_data = None
         except Exception as e:
             print(f"Error in live_data_loop: {e}")
             self.live_fpl_data = None
@@ -341,62 +350,48 @@ class FPLBot(commands.Bot):
         
         live_data = self.live_fpl_data
         if not live_data:
-            self.last_known_goals = {} # Reset cache when no GW is live
+            self.last_known_goals = {}
             return
         
-        # Get bootstrap data to find the current GW ID
+        current_gw = live_data.get('gw')
+        if not current_gw:
+            return
+
+        if self.last_known_goals.get("gw") != current_gw:
+            print(f"Initializing goal cache for GW {current_gw}.")
+            self.last_known_goals = {"gw": current_gw}
+            for player_stats in live_data.get('elements', []):
+                self.last_known_goals[player_stats['id']] = player_stats['stats']['goals_scored']
+            return
+
         bootstrap_data = await fetch_fpl_api(self.session, f"{BASE_API_URL}bootstrap-static/")
         if not bootstrap_data: return
 
-        live_event = next((event for event in bootstrap_data.get('events', []) if event['is_current']), None)
-        if not live_event: return # Should not happen if live_data exists, but a good safeguard.
-        
-        current_gw = live_event['id']
-
-        # Initialize cache if it's empty
-        if not self.last_known_goals or self.last_known_goals.get("gw") != current_gw:
-            self.last_known_goals = {"gw": current_gw} # Reset for new gameweek
-            for player_stats in live_data['elements']:
-                self.last_known_goals[player_stats['id']] = player_stats['stats']['goals_scored']
-            print("Initialized goal cache for GW {current_gw}.")
-            return # Don't send alerts on first run of a new GW
-
-        # Get all subscribed channels
-        subscriptions = await asyncio.to_thread(get_all_goal_subscriptions)
-        if not subscriptions:
-            return
-
-        # --- Check for new goals ---
-        for player_stats in live_data['elements']:
+        for player_stats in live_data.get('elements', []):
             player_id = player_stats['id']
             new_goals = player_stats['stats']['goals_scored']
             old_goals = self.last_known_goals.get(player_id, 0)
 
             if new_goals > old_goals:
-                goals_scored = new_goals - old_goals
-                self.last_known_goals[player_id] = new_goals # Update cache
+                self.last_known_goals[player_id] = new_goals
                 
-                # --- A goal has been scored! ---
-                player_info = next((p for p in bootstrap_data['elements'] if p['id'] == player_id), None)
+                goals_scored = new_goals - old_goals
+                player_info = next((p for p in bootstrap_data.get('elements', []) if p['id'] == player_id), None)
                 if not player_info: continue
 
-                # Get opponent
                 team_id = player_info['team']
-                fixture = next((f for f in live_data['fixtures'] if f['team_h'] == team_id or f['team_a'] == team_id), None)
+                fixture = next((f for f in live_data.get('fixtures', []) if f['team_h'] == team_id or f['team_a'] == team_id), None)
                 if not fixture: continue
                 
                 opponent_id = fixture['team_a'] if fixture['team_h'] == team_id else fixture['team_h']
-                opponent_team = next((t for t in bootstrap_data['teams'] if t['id'] == opponent_id), None)
+                opponent_team = next((t for t in bootstrap_data.get('teams', []) if t['id'] == opponent_id), None)
                 opponent_name = opponent_team['name'] if opponent_team else "Unknown"
-                player_team = next((t for t in bootstrap_data['teams'] if t['id'] == team_id), None)
+                player_team = next((t for t in bootstrap_data.get('teams', []) if t['id'] == team_id), None)
 
-
-                # --- Find owners and broadcast ---
-                for channel_id, league_id in subscriptions.items():
+                for channel_id, league_id in (await asyncio.to_thread(get_all_goal_subscriptions)).items():
                     channel = self.get_channel(int(channel_id))
                     if not channel or not channel.guild: continue
 
-                    # Update picks cache for this league if needed for the current GW
                     if self.picks_cache.get('gw') != current_gw or league_id not in self.picks_cache:
                         self.picks_cache = {'gw': current_gw, league_id: {}}
                         linked_users = await asyncio.to_thread(get_linked_users, channel.guild.id, league_id)
@@ -405,26 +400,20 @@ class FPLBot(commands.Bot):
                             if picks:
                                 self.picks_cache[league_id][user['discord_user_id']] = picks
                     
-                    # Find owners in the channel's league
                     owners, benched = [], []
                     for user_id, picks in self.picks_cache.get(league_id, {}).items():
-                        for pick in picks['picks']:
+                        for pick in picks.get('picks', []):
                             if pick['element'] == player_id:
-                                if pick['position'] <= 11:
-                                    owners.append(f"<@{user_id}>")
-                                else:
-                                    benched.append(f"<@{user_id}>")
+                                if pick['position'] <= 11: owners.append(f"<@{user_id}>")
+                                else: benched.append(f"<@{user_id}>")
                     
-                    # Build and send embed
                     embed = discord.Embed(
                         title=f"⚽ GOAL: {player_info['web_name']} ({player_team['short_name']})",
                         description=f"Scored {goals_scored} goal(s) against **{opponent_name}**!",
                         color=discord.Color.green()
                     )
-                    if owners:
-                        embed.add_field(name="Owned By", value=", ".join(owners))
-                    if benched:
-                        embed.add_field(name="Benched By (🤡)", value=", ".join(benched))
+                    if owners: embed.add_field(name="Owned By", value=", ".join(owners))
+                    if benched: embed.add_field(name="Benched By (🤡)", value=", ".join(benched))
                     
                     await channel.send(embed=embed)
 
@@ -1350,7 +1339,22 @@ async def claim(interaction: discord.Interaction, team: str):
     
 
 
-    fpl_team_id = int(team)
+    try:
+
+
+        fpl_team_id = int(team)
+
+
+    except ValueError:
+
+
+        await interaction.followup.send("Invalid team selection. Please choose a team from the autocomplete list.", ephemeral=True)
+
+
+        return
+
+
+        
 
 
     user_id = interaction.user.id
@@ -1509,7 +1513,11 @@ async def assign(interaction: discord.Interaction, user: discord.User, team: str
         await interaction.followup.send("This command can only be used in a server.", ephemeral=True)
         return
 
-    fpl_team_id = int(team)
+    try:
+        fpl_team_id = int(team)
+    except ValueError:
+        await interaction.followup.send("Invalid team selection. Please choose a team from the autocomplete list.", ephemeral=True)
+        return
     
     # Use the new guild-aware linking function
     await asyncio.to_thread(link_user_to_team, interaction.guild_id, user.id, fpl_team_id)
@@ -1548,7 +1556,11 @@ async def team(interaction: discord.Interaction, manager: str = None):
 
     manager_id = None
     if manager:
-        manager_id = int(manager)
+        try:
+            manager_id = int(manager)
+        except ValueError:
+            await interaction.followup.send("Invalid team selection. Please choose a team from the autocomplete list.", ephemeral=True)
+            return
     else:
         if not interaction.guild_id:
             await interaction.followup.send("This command must be used in a server to find your team.", ephemeral=True)
@@ -1570,40 +1582,46 @@ async def team(interaction: discord.Interaction, manager: str = None):
     if not league_id:
         return
 
-    # Fetch bootstrap to determine GW status
+    # --- Gameweek and Data determination ---
     bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
     if not bootstrap_data:
         await interaction.followup.send("Could not fetch FPL bootstrap data.")
         return
 
-    current_gw_event = next((event for event in bootstrap_data.get('events', []) if event['is_current']), None)
-    if not current_gw_event:
-        await interaction.followup.send("Could not determine the current gameweek.")
+    gw_event = next((event for event in bootstrap_data.get('events', []) if event['is_current']), None)
+    if not gw_event:
+        gw_event = next((event for event in sorted(bootstrap_data.get('events', []), key=lambda x: x['id'], reverse=True) if event['finished']), None)
+    
+    if not gw_event:
+        await interaction.followup.send("Could not determine the current or last gameweek.")
         return
         
-    current_gw = current_gw_event['id']
-    is_finished = current_gw_event['finished']
+    current_gw = gw_event['id']
+    is_finished = gw_event['finished']
 
-    # Use the new in-memory cache for live data
+    # Try to use the live cache if it's for the correct gameweek
     live_data = bot.live_fpl_data
+    if not live_data or live_data.get('gw') != current_gw:
+        live_data = await fetch_fpl_api(session, f"{BASE_API_URL}event/{current_gw}/live/")
+
     if not live_data:
-        await interaction.followup.send("There is no live gameweek data currently available. Please wait for the background task to fetch it.")
+        await interaction.followup.send(f"Could not fetch data for Gameweek {current_gw}.")
         return
 
+    # --- Fetch league data ---
     league_data = await fetch_fpl_api(
         session,
         f"{BASE_API_URL}leagues-classic/{league_id}/standings/",
         cache_key=f"league_{league_id}_standings",
         cache_gw=current_gw
     )
-
-    if not all([live_data, league_data]):
-        await interaction.followup.send("Failed to fetch essential FPL data. Please try again later.")
+    if not league_data:
+        await interaction.followup.send("Failed to fetch FPL league data.")
         return
 
-    live_points_map = {p['id']: p['stats'] for p in live_data['elements']}
+    live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
     
-    tasks = [get_live_manager_details(session, mgr, current_gw, live_points_map, is_finished=is_finished) for mgr in league_data['standings']['results']]
+    tasks = [get_live_manager_details(session, mgr, current_gw, live_points_map, is_finished=is_finished) for mgr in league_data.get('standings', {}).get('results', [])]
     all_manager_data = await asyncio.gather(*tasks)
     
     manager_live_scores = [d for d in all_manager_data if d is not None]
@@ -1664,43 +1682,49 @@ async def table(interaction: discord.Interaction):
     if not league_id:
         return
 
+    # --- Gameweek and Data determination ---
     bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
     if not bootstrap_data:
         await interaction.followup.send("Could not fetch FPL bootstrap data.")
         return
 
-    current_gw_event = next((event for event in bootstrap_data.get('events', []) if event['is_current']), None)
-    if not current_gw_event:
-        # If no current GW, try to get the last completed one for a final table
-        current_gw_event = next((event for event in sorted(bootstrap_data.get('events', []), key=lambda x: x['id'], reverse=True) if event['finished']), None)
-        if not current_gw_event:
-            await interaction.followup.send("Could not determine the current or last gameweek.")
-            return
-
-    current_gw = current_gw_event['id']
-    is_finished = current_gw_event['finished']
+    # Find the current or last finished gameweek
+    gw_event = next((event for event in bootstrap_data.get('events', []) if event['is_current']), None)
+    if not gw_event:
+        gw_event = next((event for event in sorted(bootstrap_data.get('events', []), key=lambda x: x['id'], reverse=True) if event['finished']), None)
+    
+    if not gw_event:
+        await interaction.followup.send("Could not determine the current or last gameweek.")
+        return
         
-    # Use the new in-memory cache for live data
+    current_gw = gw_event['id']
+    is_finished = gw_event['finished']
+
+    # Try to use the live cache if it's for the correct gameweek
     live_data = bot.live_fpl_data
+    if not live_data or live_data.get('gw') != current_gw:
+        live_data = await fetch_fpl_api(session, f"{BASE_API_URL}event/{current_gw}/live/")
+
     if not live_data:
-        await interaction.followup.send("There is no live gameweek data currently available. Please wait for the background task to fetch it.")
+        await interaction.followup.send(f"Could not fetch data for Gameweek {current_gw}.")
         return
 
+    # --- Fetch league data ---
     league_data = await fetch_fpl_api(
         session,
         f"{BASE_API_URL}leagues-classic/{league_id}/standings/",
         cache_key=f"league_{league_id}_standings",
         cache_gw=current_gw,
-        force_refresh=True
+        force_refresh=not is_finished # Only force refresh standings for live gameweeks
     )
-
     if not league_data:
-        await interaction.followup.send("Failed to fetch FPL league data. Please try again later.")
+        await interaction.followup.send("Failed to fetch FPL league data.")
         return
 
-    live_points_map = {p['id']: p['stats'] for p in live_data['elements']}
+    # --- Process and Display ---
+    live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
     
-    tasks = [get_live_manager_details(session, manager, current_gw, live_points_map, is_finished=is_finished) for manager in league_data['standings']['results']]
+    tasks = [get_live_manager_details(session, manager, current_gw, live_points_map, is_finished=is_finished) for manager in league_data.get('standings', {}).get('results', [])]
     manager_details = [res for res in await asyncio.gather(*tasks) if res]
 
     manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
@@ -1722,7 +1746,7 @@ async def table(interaction: discord.Interaction):
     table_content += "```"
     message = f"{header}\n{table_content}"
 
-    has_next_page = league_data['standings'].get('has_next', False)
+    has_next_page = league_data.get('standings', {}).get('has_next', False)
     if len(manager_details) > TABLE_LIMIT or has_next_page:
         league_url = f"https://fantasy.premierleague.com/leagues/{league_id}/standings/c"
         message += f"\nView the full table at <{league_url}>"
@@ -1733,7 +1757,11 @@ async def table(interaction: discord.Interaction):
 @app_commands.describe(player="Select the player to check ownership for.")
 async def player(interaction: discord.Interaction, player: str):
     await interaction.response.defer()
-    player_id = int(player)
+    try:
+        player_id = int(player)
+    except ValueError:
+        await interaction.followup.send("Invalid player selection. Please choose a player from the autocomplete list.", ephemeral=True)
+        return
 
     session = bot.session
     league_id = await ensure_league_id(interaction)
@@ -2332,8 +2360,12 @@ async def h2h(interaction: discord.Interaction, manager_a: str, manager_b: str):
         return
 
     # Get FPL IDs and names
-    p1_fpl_id = int(manager_a)
-    p2_fpl_id = int(manager_b)
+    try:
+        p1_fpl_id = int(manager_a)
+        p2_fpl_id = int(manager_b)
+    except ValueError:
+        await interaction.followup.send("Invalid team selection. Please choose a team from the autocomplete list.", ephemeral=True)
+        return
     
     manager1_data = await asyncio.to_thread(get_team_by_fpl_id, p1_fpl_id)
     manager2_data = await asyncio.to_thread(get_team_by_fpl_id, p2_fpl_id)
