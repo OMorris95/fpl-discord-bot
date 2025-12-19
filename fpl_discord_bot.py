@@ -2307,21 +2307,34 @@ async def fixtures(interaction: discord.Interaction, team: str = None):
     else: # All teams
         fixtures_by_team = {team_id: [] for team_id in teams_map}
         for f in upcoming_fixtures:
+            gw_str = f"GW{f['event']}"
             # Home team
             h_opponent = teams_map[f['team_a']]['short_name']
             h_fdr = get_fdr_emoji(f['team_h_difficulty'])
-            fixtures_by_team[f['team_h']].append(f"GW{f['event']}:{h_opponent}(H){h_fdr}")
+            fixtures_by_team[f['team_h']].append(f"{gw_str:<5} {h_opponent}(H) {h_fdr}")
             # Away team
             a_opponent = teams_map[f['team_h']]['short_name']
             a_fdr = get_fdr_emoji(f['team_a_difficulty'])
-            fixtures_by_team[f['team_a']].append(f"GW{f['event']}:{a_opponent}(A){a_fdr}")
+            fixtures_by_team[f['team_a']].append(f"{gw_str:<5} {a_opponent}(A) {a_fdr}")
 
-        # Sort and add to embed
+        # Create a list of fields to be added
+        fields_to_add = []
         for team_id, team_data in sorted(teams_map.items(), key=lambda x: x[1]['name']):
             if fixtures_by_team[team_id]:
                 # Sort this team's fixtures by gameweek
-                sorted_fixtures = sorted(fixtures_by_team[team_id], key=lambda x: int(x.split(':')[0][2:]))
-                embed.add_field(name=team_data['name'], value=" ".join(sorted_fixtures))
+                sorted_fixtures = sorted(fixtures_by_team[team_id], key=lambda x: int(x.split()[0][2:]))
+                value_string = "```\n" + "\n".join(sorted_fixtures) + "\n```"
+                fields_to_add.append({'name': team_data['name'], 'value': value_string, 'inline': True})
+        
+        # Add fields in chunks of 3 to ensure alignment
+        for i in range(0, len(fields_to_add), 3):
+            chunk = fields_to_add[i:i+3]
+            for field in chunk:
+                embed.add_field(name=field['name'], value=field['value'], inline=True)
+            # Add blank fields to fill the row if it's not a full row of 3
+            if len(chunk) < 3:
+                for _ in range(3 - len(chunk)):
+                    embed.add_field(name='\u200b', value='\u200b', inline=True)
 
     await interaction.followup.send(embed=embed)
 
