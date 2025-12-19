@@ -629,7 +629,7 @@ def build_manager_url(entry_id, gameweek=None):
 def format_manager_link(label, entry_id, gameweek=None):
     """Wrap a label in Markdown linking to the manager's FPL team."""
     url = build_manager_url(entry_id, gameweek)
-    return f"[{label}](<{url}>)"
+    return f"[{label}]({url})"
 
 
 async def get_manager_transfer_activity(session, manager_entry_id, gameweek):
@@ -2111,76 +2111,68 @@ async def transfers(interaction: discord.Interaction):
         "freehit": "Free Hit 🪙"
     }
 
-    # Group output into blocks (one block per manager) to prevent splitting a manager across messages
-    blocks = []
-    blocks.append([f"**Gameweek {current_gw} Transfers**", ""])
-
+    # Process all managers and create a list of fields to be added to embeds
+    fields = []
     for manager, data in zip(managers, manager_transfer_data):
-        manager_block = []
+        if data is None or (not data['transfers'] and not data['chip']):
+            continue
+
         manager_name = manager['player_name']
         team_name = manager['entry_name']
         entry_id = manager['entry']
-        manager_link = format_manager_link(manager_name, entry_id, current_gw)
-        team_link = format_manager_link(team_name, entry_id, current_gw)
-
-        if data is None:
-            manager_block.append(f"{manager_link} - {team_link}:")
-            manager_block.append("    Unable to retrieve transfer data.")
-            blocks.append(manager_block)
-            continue
-
+        
         status_tokens = []
         chip_label = chip_labels.get(data['chip'])
-        if chip_label:
-            status_tokens.append(chip_label)
-        if data['transfer_cost']:
-            status_tokens.append(f"-{data['transfer_cost']} pts")
-
+        if chip_label: status_tokens.append(chip_label)
+        if data['transfer_cost']: status_tokens.append(f"-{data['transfer_cost']} pts")
+        
         suffix = f" ({', '.join(status_tokens)})" if status_tokens else ""
-        transfers_this_week = data['transfers']
-        if not transfers_this_week and not status_tokens:
-            continue
-
-        manager_block.append(f"**{manager_link} - {team_link}{suffix}**")
-
-        for transfer in transfers_this_week:
-            out_player = player_lookup.get(transfer.get('element_out'))
-            in_player = player_lookup.get(transfer.get('element_in'))
-
-            out_name = out_player['web_name'] if out_player else "Unknown"
-            in_name = in_player['web_name'] if in_player else "Unknown"
-
-            out_cost = transfer.get('element_out_cost')
-            in_cost = transfer.get('element_in_cost')
-
-            if out_cost is None and out_player:
-                out_cost = out_player.get('now_cost')
-            if in_cost is None and in_player:
-                in_cost = in_player.get('now_cost')
-
-            out_price = f"£{(out_cost or 0) / 10:.1f}m"
-            in_price = f"£{(in_cost or 0) / 10:.1f}m"
-
-            manager_block.append(f"    ❌ {out_name} ({out_price}) ➜ ✅ {in_name} ({in_price})")
-        manager_block.append("")
-        blocks.append(manager_block)
-
-    # Send in chunks, keeping blocks intact
-    current_chunk = []
-    current_length = 0
-    for block in blocks:
-        block_len = sum(len(line) + 1 for line in block)
+        field_name = f"**{manager_name}**{suffix}"
         
-        if current_length + block_len > 1900 and current_chunk:
-            await interaction.followup.send("\n".join(current_chunk))
-            current_chunk = []
-            current_length = 0
-        
-        current_chunk.extend(block)
-        current_length += block_len
+        # Build the field value, with the link on the first line
+        team_url = build_manager_url(entry_id, current_gw)
+        transfer_lines = [f"[{team_name}]({team_url})"]
 
-    if current_chunk:
-        await interaction.followup.send("\n".join(current_chunk))
+        if not data['transfers'] and chip_label:
+             transfer_lines.append("No transfers made")
+        else:
+            for transfer in data['transfers']:
+                out_player = player_lookup.get(transfer.get('element_out'))
+                in_player = player_lookup.get(transfer.get('element_in'))
+                out_name = out_player['web_name'] if out_player else "Unknown"
+                in_name = in_player['web_name'] if in_player else "Unknown"
+                out_price = f"£{(transfer.get('element_out_cost', 0) or 0) / 10:.1f}m"
+                in_price = f"£{(transfer.get('element_in_cost', 0) or 0) / 10:.1f}m"
+                transfer_lines.append(f"❌ {out_name} ({out_price}) ➜ ✅ {in_name} ({in_price})")
+
+        field_value = "\n".join(transfer_lines)
+        # Add a blank line for spacing if there are transfers to show
+        if transfer_lines:
+             field_value += "\n\u200b"
+        fields.append({'name': field_name, 'value': field_value, 'inline': False})
+
+    if not fields:
+        await interaction.followup.send(f"No transfers or chips played in GW {current_gw}.")
+        return
+
+    # Send embeds in chunks of 25 fields
+    for i in range(0, len(fields), 25):
+        chunk = fields[i:i+25]
+        
+        embed = discord.Embed(
+            title=f"Gameweek {current_gw} Transfers",
+            color=discord.Color.blue()
+        )
+        if i > 0: # Add a page number for subsequent embeds
+            embed.title += f" (Page {i//25 + 1})"
+
+        for field in chunk:
+            embed.add_field(name=field['name'], value=field['value'], inline=False)
+        
+        if i == 0:
+            await interaction.followup.send(embed=embed)
+        else:
+            await interaction.channel.send(embed=embed)
 
 
 @bot.tree.command(name="captains", description="Shows which player each manager captained for the current gameweek.")
