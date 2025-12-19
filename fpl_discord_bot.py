@@ -1729,29 +1729,37 @@ async def table(interaction: discord.Interaction):
 
     manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
 
-    header = f"**🏆 {league_data['league']['name']} - Live GW {current_gw} Table 🏆**"
-    TABLE_LIMIT = 25
-    table_content = "```"
-    table_content += f"{'Rank':<5} {'Manager':<20} {'GW Pts':<8} {'Total':<8} {'Played':<8}\n"
-    table_content += "-" * 52 + "\n"
+    # --- Build Embed ---
+    embed = discord.Embed(
+        title=f"🏆 {league_data['league']['name']} - Live GW {current_gw} Table 🏆",
+        color=discord.Color.blue()
+    )
 
+    TABLE_LIMIT = 25
+    
+    # Build a line-by-line description for mobile-friendliness
+    table_lines = []
+    
     for i, manager in enumerate(manager_details[:TABLE_LIMIT]):
         rank = i + 1
-        table_content += (
-            f"{str(rank):<5} {manager['name']:<20.19} "
-            f"{manager['final_gw_points']:<8} {manager['live_total_points']:<8} "
-            f"{manager['players_played']}/11\n"
+        rank_str = f"**{rank}.**"
+        
+        table_lines.append(
+            f"{rank_str} **{manager['name']}**: {manager['live_total_points']} total ({manager['final_gw_points']} GW)"
         )
 
-    table_content += "```"
-    message = f"{header}\n{table_content}"
+    if not table_lines:
+        embed.description = "Could not generate table for this league."
+    else:
+        embed.description = "\n".join(table_lines)
 
     has_next_page = league_data.get('standings', {}).get('has_next', False)
     if len(manager_details) > TABLE_LIMIT or has_next_page:
         league_url = f"https://fantasy.premierleague.com/leagues/{league_id}/standings/c"
-        message += f"\nView the full table at <{league_url}>"
+        # Add a footer instead of appending to description to keep it clean
+        embed.set_footer(text=f"Only showing top {TABLE_LIMIT}. View the full table for more details.")
 
-    await interaction.followup.send(message)
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="player", description="Shows which managers in the league own a specific player.")
 @app_commands.describe(player="Select the player to check ownership for.")
