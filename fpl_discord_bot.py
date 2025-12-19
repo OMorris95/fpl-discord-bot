@@ -303,42 +303,63 @@ class FPLBot(commands.Bot):
         self.session = None
         self.last_known_goals = {}
         self.picks_cache = {} # Cache for manager picks
+        self.live_fpl_data = None # In-memory cache for live GW data
 
     async def setup_hook(self):
         init_database()
         self.session = aiohttp.ClientSession()
         self.api_semaphore = asyncio.Semaphore(10)
+        self.live_data_loop.start()
         self.goal_check_loop.start()
         await self.tree.sync()
         print(f"Synced slash commands for {self.user}.")
 
     @tasks.loop(seconds=60)
+    async def live_data_loop(self):
+        """Periodically fetches live FPL data for the current gameweek."""
+        await self.wait_until_ready()
+        try:
+            bootstrap_data = await fetch_fpl_api(self.session, f"{BASE_API_URL}bootstrap-static/")
+            if not bootstrap_data or 'events' not in bootstrap_data:
+                self.live_fpl_data = None
+                return
+
+            live_event = next((event for event in bootstrap_data['events'] if event['is_current']), None)
+            if not live_event or not live_event.get('data_checked'):
+                self.live_fpl_data = None # No live gameweek
+                return
+            
+            current_gw = live_event['id']
+            self.live_fpl_data = await fetch_fpl_api(self.session, f"{BASE_API_URL}event/{current_gw}/live/")
+        except Exception as e:
+            print(f"Error in live_data_loop: {e}")
+            self.live_fpl_data = None
+
+    @tasks.loop(seconds=60)
     async def goal_check_loop(self):
         await self.wait_until_ready()
         
-        # Check if any gameweek is live
-        bootstrap_data = await fetch_fpl_api(self.session, f"{BASE_API_URL}bootstrap-static/")
-        if not bootstrap_data or 'events' not in bootstrap_data:
-            return
-
-        live_event = next((event for event in bootstrap_data['events'] if event['is_current']), None)
-        if not live_event:
+        live_data = self.live_fpl_data
+        if not live_data:
             self.last_known_goals = {} # Reset cache when no GW is live
             return
         
-        current_gw = live_event['id']
+        # Get bootstrap data to find the current GW ID
+        bootstrap_data = await fetch_fpl_api(self.session, f"{BASE_API_URL}bootstrap-static/")
+        if not bootstrap_data: return
+
+        live_event = next((event for event in bootstrap_data.get('events', []) if event['is_current']), None)
+        if not live_event: return # Should not happen if live_data exists, but a good safeguard.
         
-        # Fetch live data for the current gameweek
-        live_data = await fetch_fpl_api(self.session, f"{BASE_API_URL}event/{current_gw}/live/")
-        if not live_data or 'elements' not in live_data:
-            return
+        current_gw = live_event['id']
 
         # Initialize cache if it's empty
-        if not self.last_known_goals:
+        if not self.last_known_goals or self.last_known_goals.get("gw") != current_gw:
+            self.last_known_goals = {"gw": current_gw} # Reset for new gameweek
             for player_stats in live_data['elements']:
                 self.last_known_goals[player_stats['id']] = player_stats['stats']['goals_scored']
-            print("Initialized goal cache.")
-            return # Don't send alerts on first run
+            print("Initialized goal cache for GW {current_gw}.")
+            return # Don't send alerts on first run of a new GW
 
         # Get all subscribed channels
         subscriptions = await asyncio.to_thread(get_all_goal_subscriptions)
@@ -410,6 +431,7 @@ class FPLBot(commands.Bot):
     async def close(self):
         if self.session:
             await self.session.close()
+        self.live_data_loop.cancel()
         self.goal_check_loop.cancel()
         await super().close()
 
@@ -1562,13 +1584,12 @@ async def team(interaction: discord.Interaction, manager: str = None):
     current_gw = current_gw_event['id']
     is_finished = current_gw_event['finished']
 
-    live_data = await fetch_fpl_api(
-        session,
-        f"{BASE_API_URL}event/{current_gw}/live/",
-        cache_key=f"event_live_gw{current_gw}",
-        cache_gw=current_gw,
-        force_refresh=True
-    )
+    # Use the new in-memory cache for live data
+    live_data = bot.live_fpl_data
+    if not live_data:
+        await interaction.followup.send("There is no live gameweek data currently available. Please wait for the background task to fetch it.")
+        return
+
     league_data = await fetch_fpl_api(
         session,
         f"{BASE_API_URL}leagues-classic/{league_id}/standings/",
@@ -1659,6 +1680,12 @@ async def table(interaction: discord.Interaction):
     current_gw = current_gw_event['id']
     is_finished = current_gw_event['finished']
         
+    # Use the new in-memory cache for live data
+    live_data = bot.live_fpl_data
+    if not live_data:
+        await interaction.followup.send("There is no live gameweek data currently available. Please wait for the background task to fetch it.")
+        return
+
     league_data = await fetch_fpl_api(
         session,
         f"{BASE_API_URL}leagues-classic/{league_id}/standings/",
@@ -1666,15 +1693,8 @@ async def table(interaction: discord.Interaction):
         cache_gw=current_gw,
         force_refresh=True
     )
-    live_data = await fetch_fpl_api(
-        session,
-        f"{BASE_API_URL}event/{current_gw}/live/",
-        cache_key=f"event_live_gw{current_gw}",
-        cache_gw=current_gw,
-        force_refresh=True
-    )
 
-    if not league_data or not live_data:
+    if not league_data:
         await interaction.followup.send("Failed to fetch FPL league data. Please try again later.")
         return
 
