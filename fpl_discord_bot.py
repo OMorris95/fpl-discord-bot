@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import io
 import asyncio
+import sqlite3
 from dotenv import load_dotenv
 from typing import Literal
 
@@ -17,6 +18,7 @@ load_dotenv()
 # --- CONFIGURATION ---
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 CONFIG_PATH = Path("config/league_config.json")
+DB_PATH = Path("config/fpl_bot.db")
 CACHE_DIR = Path("cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -38,6 +40,96 @@ def save_league_config():
 
 
 league_config = load_league_config()
+
+
+def init_database():
+    """Initializes the database and creates tables if they don't exist."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS league_teams (
+                fpl_team_id INTEGER PRIMARY KEY,
+                league_id INTEGER NOT NULL,
+                team_name TEXT NOT NULL,
+                manager_name TEXT NOT NULL,
+                discord_user_id TEXT
+            )
+        """)
+        con.commit()
+
+
+def upsert_league_teams(league_id, teams):
+    """Inserts or updates team information in the database."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        for team in teams:
+            cur.execute("""
+                INSERT INTO league_teams (fpl_team_id, league_id, team_name, manager_name)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(fpl_team_id) DO UPDATE SET
+                    team_name = excluded.team_name,
+                    manager_name = excluded.manager_name
+            """, (team['entry'], league_id, team['entry_name'], team['player_name']))
+        con.commit()
+
+
+def get_fpl_id(discord_user_id: int):
+    """Gets the FPL team ID linked to a Discord user ID."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        cur.execute("SELECT fpl_team_id FROM league_teams WHERE discord_user_id = ?", (str(discord_user_id),))
+        result = cur.fetchone()
+        return result[0] if result else None
+
+
+def get_discord_user(fpl_team_id: int):
+    """Gets the Discord user ID linked to an FPL team ID."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        cur.execute("SELECT discord_user_id FROM league_teams WHERE discord_user_id IS NOT NULL and fpl_team_id = ?", (fpl_team_id,))
+        result = cur.fetchone()
+        return result[0] if result else None
+
+
+def get_unclaimed_teams(league_id: int, search_term: str):
+    """Gets a list of unclaimed teams for autocomplete."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        cur.execute("""
+            SELECT fpl_team_id, team_name, manager_name FROM league_teams
+            WHERE league_id = ? AND (team_name LIKE ? OR manager_name LIKE ?) AND discord_user_id IS NULL
+            LIMIT 25
+        """, (league_id, f"%{search_term}%", f"%{search_term}%"))
+        return cur.fetchall()
+
+def get_all_teams_for_autocomplete(league_id: int, search_term: str):
+    """Gets a list of all teams for autocomplete."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        cur.execute("""
+            SELECT fpl_team_id, team_name, manager_name FROM league_teams
+            WHERE league_id = ? AND (team_name LIKE ? OR manager_name LIKE ?)
+            LIMIT 25
+        """, (league_id, f"%{search_term}%", f"%{search_term}%"))
+        return cur.fetchall()
+
+def claim_team(fpl_team_id: int, discord_user_id: int):
+    """Links a Discord user to an FPL team."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        cur.execute("UPDATE league_teams SET discord_user_id = ? WHERE fpl_team_id = ?", (str(discord_user_id), fpl_team_id))
+        con.commit()
+
+
+def get_team_by_fpl_id(fpl_team_id: int):
+    """Gets all details for a specific FPL team."""
+    with sqlite3.connect(DB_PATH) as con:
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute("SELECT * FROM league_teams WHERE fpl_team_id = ?", (fpl_team_id,))
+        return cur.fetchone()
+
+
 
 
 def _load_cached_json_sync(path: Path):
@@ -120,10 +212,13 @@ class FPLBot(commands.Bot):
     """A Discord bot for displaying FPL league and team information."""
     def __init__(self):
         intents = discord.Intents.default()
+        intents.presences = True
+        intents.members = True
         super().__init__(command_prefix="!", intents=intents)
         self.session = None
 
     async def setup_hook(self):
+        init_database()
         self.session = aiohttp.ClientSession()
         self.api_semaphore = asyncio.Semaphore(10)
         await self.tree.sync()
@@ -136,6 +231,7 @@ class FPLBot(commands.Bot):
 
     async def on_ready(self):
         print(f"Logged in as {self.user} (ID: {self.user.id})")
+        await bot.change_presence(status=discord.Status.online, activity=discord.Game(name="Fantasy Premier League"))
         print("Bot is ready and online.")
 
 bot = FPLBot()
@@ -665,17 +761,216 @@ async def setleague(interaction: discord.Interaction, league_id: int, scope: str
     target_id = interaction.guild_id if scope_value == "server" else interaction.channel_id
     set_league_mapping(scope_value, target_id, league_id)
 
+    # --- New User Linking Logic ---
+    standings_data = league_data.get('standings', {}).get('results', [])
     location = "this server" if scope_value == "server" else f"{interaction.channel.mention}"
-    league_name = league_data['league']['name']
-    await interaction.followup.send(f"League set to **{league_name}** ({league_id}) for {location}.")
+    if standings_data:
+        upsert_league_teams(league_id, standings_data)
+        feedback_message = (
+            f"League set to **{league_data['league']['name']}** ({league_id}) for {location}.\n"
+            f"Found and synced **{len(standings_data)}** teams. Users can now use `/claim` to link their Discord account."
+        )
+    else:
+        feedback_message = (
+            f"League set to **{league_data['league']['name']}** ({league_id}) for {location}, "
+            "but no teams were found in the standings."
+        )
+
+    await interaction.followup.send(feedback_message)
+
+
+class AdminApprovalView(discord.ui.View):
+    def __init__(self, fpl_team_id: int, new_user_id: int, original_interaction: discord.Interaction):
+        super().__init__(timeout=86400) # 24 hours
+        self.fpl_team_id = fpl_team_id
+        self.new_user_id = new_user_id
+        self.original_interaction = original_interaction
+
+        # Create buttons with callbacks
+        approve_button = discord.ui.Button(label="Approve Transfer", style=discord.ButtonStyle.green)
+        approve_button.callback = self.approve_callback
+        self.add_item(approve_button)
+
+        deny_button = discord.ui.Button(label="Deny Request", style=discord.ButtonStyle.red)
+        deny_button.callback = self.deny_callback
+        self.add_item(deny_button)
+
+    async def approve_callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        # Update DB
+        await asyncio.to_thread(claim_team, self.fpl_team_id, self.new_user_id)
+        
+        # Edit message
+        embed = interaction.message.embeds[0]
+        embed.color = discord.Color.green()
+        embed.description = f"✅ Approved by {interaction.user.mention}"
+        self.clear_items() # Disable buttons
+        await interaction.message.edit(embed=embed, view=self)
+        
+        # Notify user
+        new_user = await interaction.client.fetch_user(self.new_user_id)
+        team_data = await asyncio.to_thread(get_team_by_fpl_id, self.fpl_team_id)
+        await new_user.send(f"Your claim for **{team_data['team_name']}** was approved.")
+
+    async def deny_callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        # Edit message
+        embed = interaction.message.embeds[0]
+        embed.color = discord.Color.red()
+        embed.description = f"⛔ Denied by {interaction.user.mention}"
+        self.clear_items() # Disable buttons
+        await interaction.message.edit(embed=embed, view=self)
+
+        # Notify user
+        new_user = await interaction.client.fetch_user(self.new_user_id)
+        team_data = await asyncio.to_thread(get_team_by_fpl_id, self.fpl_team_id)
+        await new_user.send(f"Your claim for **{team_data['team_name']}** was denied.")
+
+
+
+
+
+@bot.tree.command(name="setadminchannel", description="Sets the channel for admin notifications.")
+@app_commands.describe(channel="The channel to be used for admin notifications.")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setadminchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Sets the admin channel for this server."""
+    await interaction.response.defer(ephemeral=True)
+    league_config.setdefault("admin_channels", {})
+    league_config["admin_channels"][str(interaction.guild_id)] = channel.id
+    save_league_config()
+    await interaction.followup.send(f"Admin channel has been set to {channel.mention}.")
+
+@setadminchannel.error
+async def setadminchannel_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("You need the `Manage Server` permission to use this command.", ephemeral=True)
+    else:
+        await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
+        raise error
+
+
+
+@bot.tree.command(name="claim", description="Claim your FPL team to link it to your Discord account.")
+@app_commands.describe(team="The FPL team you want to claim.")
+async def claim(interaction: discord.Interaction, team: str):
+    await interaction.response.defer(ephemeral=True)
+    
+    fpl_team_id = int(team)
+    user_id = interaction.user.id
+
+    team_data = await asyncio.to_thread(get_team_by_fpl_id, fpl_team_id)
+
+    if not team_data:
+        await interaction.followup.send("That team could not be found. It might not be in the configured league.", ephemeral=True)
+        return
+
+    if team_data['discord_user_id'] is None:
+        # Team is unclaimed
+        await asyncio.to_thread(claim_team, fpl_team_id, user_id)
+        await interaction.followup.send(f"✅ Success! You have been linked to **{team_data['team_name']}**.", ephemeral=True)
+    else:
+        # Team is claimed
+        current_owner_id = team_data['discord_user_id']
+        admin_channel_id = league_config.get("admin_channels", {}).get(str(interaction.guild_id))
+        
+        if not admin_channel_id:
+            await interaction.followup.send("⚠️ That team is already linked to another user, but no admin channel is configured for this server to handle the conflict.", ephemeral=True)
+            return
+
+        admin_channel = bot.get_channel(int(admin_channel_id))
+        if not admin_channel:
+            await interaction.followup.send("⚠️ The configured admin channel could not be found.", ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title="🚨 Claim Conflict",
+            description=f"<@{user_id}> wants to claim **{team_data['team_name']}**.",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="Currently Owned By", value=f"<@{current_owner_id}>", inline=False)
+        embed.add_field(name="FPL Team ID", value=str(fpl_team_id), inline=False)
+
+        view = AdminApprovalView(fpl_team_id, user_id, interaction)
+        await admin_channel.send(embed=embed, view=view)
+        
+        await interaction.followup.send("⚠️ That team is already linked to another user. An admin approval request has been sent.", ephemeral=True)
+
+@claim.autocomplete('team')
+async def claim_autocomplete(interaction: discord.Interaction, current: str):
+    league_id = get_league_id_for_context(interaction)
+    if not league_id:
+        return []
+    
+    unclaimed_teams = await asyncio.to_thread(get_unclaimed_teams, league_id, current)
+    
+    choices = [
+        app_commands.Choice(name=f"{team_name} ({manager_name})", value=str(fpl_team_id))
+        for fpl_team_id, team_name, manager_name in unclaimed_teams
+    ]
+    return choices
+
+
+@bot.tree.command(name="assign", description="Manually assign an FPL team to a Discord user.")
+@app_commands.describe(user="The Discord user to assign the team to.", team="The FPL team to assign.")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def assign(interaction: discord.Interaction, user: discord.User, team: str):
+    await interaction.response.defer(ephemeral=True)
+
+    fpl_team_id = int(team)
+    
+    await asyncio.to_thread(claim_team, fpl_team_id, user.id)
+
+    team_data = await asyncio.to_thread(get_team_by_fpl_id, fpl_team_id)
+    
+    await interaction.followup.send(f"✅ Manually linked {user.mention} to **{team_data['team_name']}**.")
+
+@assign.autocomplete('team')
+async def assign_autocomplete(interaction: discord.Interaction, current: str):
+    league_id = get_league_id_for_context(interaction)
+    if not league_id:
+        return []
+    
+    all_teams = await asyncio.to_thread(get_all_teams_for_autocomplete, league_id, current)
+    
+    choices = [
+        app_commands.Choice(name=f"{team_name} ({manager_name})", value=str(fpl_team_id))
+        for fpl_team_id, team_name, manager_name in all_teams
+    ]
+    return choices
+
+@assign.error
+async def assign_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("You need the `Manage Server` permission to use this command.", ephemeral=True)
+    else:
+        await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
+        raise error
 
 
 @bot.tree.command(name="team", description="Generates an image of a manager's current FPL team.")
-@app_commands.describe(manager="Select the manager's team to view.")
-async def team(interaction: discord.Interaction, manager: str):
+@app_commands.describe(manager="Select the manager's team to view. Leave blank to view your own.")
+async def team(interaction: discord.Interaction, manager: str = None):
     await interaction.response.defer()
-    manager_id = int(manager)
 
+    manager_id = None
+    if manager:
+        manager_id = int(manager)
+    else:
+        # If no manager is specified, try to get the user's claimed team
+        fpl_id = await asyncio.to_thread(get_fpl_id, interaction.user.id)
+        if fpl_id:
+            manager_id = fpl_id
+        else:
+            await interaction.followup.send("You have not claimed a team. Please use `/claim` first, or specify a manager.", ephemeral=True)
+            return
+
+    if not manager_id:
+        await interaction.followup.send("Could not determine which team to display.", ephemeral=True)
+        return
+    
     session = bot.session
     league_id = await ensure_league_id(interaction)
     if not league_id:
@@ -755,8 +1050,12 @@ async def team_autocomplete(interaction: discord.Interaction, current: str):
     if not league_id:
         return []
 
-    managers = await get_league_managers(bot.session, league_id)
-    choices = [app_commands.Choice(name=name, value=str(id)) for name, id in managers.items() if current.lower() in name.lower()]
+    all_teams = await asyncio.to_thread(get_all_teams_for_autocomplete, league_id, current)
+    
+    choices = [
+        app_commands.Choice(name=f"{team_name} ({manager_name})", value=str(fpl_team_id))
+        for fpl_team_id, team_name, manager_name in all_teams
+    ]
     return choices[:25]
 
 @bot.tree.command(name="table", description="Displays the live FPL league table.")
