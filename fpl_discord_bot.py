@@ -1833,27 +1833,32 @@ async def player(interaction: discord.Interaction, player: str):
     all_picks_data = await asyncio.gather(*tasks)
     
     owners = []
+    benched = []
     for i, picks_data in enumerate(all_picks_data):
         if picks_data and 'picks' in picks_data:
             manager_name = league_data['standings']['results'][i]['player_name']
             for pick in picks_data['picks']:
                 if pick['element'] == player_id:
-                    # Check if player is on bench (positions 12-15) or starting XI (positions 1-11)
                     if pick['position'] > 11:
-                        owners.append(f"{manager_name} **(B)**")  # On bench
+                        benched.append(manager_name)
                     else:
-                        owners.append(manager_name)  # Starting XI
+                        owners.append(manager_name)
                     break
     
-    if owners:
-        owner_count = len(owners)
-        response = f"**{player_name}** features in **{owner_count}** team{'s' if owner_count != 1 else ''}:\n"
-        for owner in owners:
-            response += f"• {owner}\n"
+    embed = discord.Embed(
+        title=f"Ownership for {player_name}",
+        color=discord.Color.blue()
+    )
+
+    if not owners and not benched:
+        embed.description = f"**{player_name}** is not owned by any managers in the league."
     else:
-        response = f"**{player_name}** is not owned by any managers in the league."
+        if owners:
+            embed.add_field(name=f"Owned By ({len(owners)})", value="\n".join(owners), inline=True)
+        if benched:
+            embed.add_field(name=f"Benched By ({len(benched)})", value="\n".join(benched), inline=True)
     
-    await interaction.followup.send(response)
+    await interaction.followup.send(embed=embed)
 
 @player.autocomplete('player')
 async def player_autocomplete(interaction: discord.Interaction, current: str):
@@ -2208,7 +2213,6 @@ async def captains(interaction: discord.Interaction):
 
     all_players = {p['id']: p for p in bootstrap_data['elements']}
     
-    # Get all managers' picks for current gameweek
     tasks = []
     for manager in league_data['standings']['results']:
         manager_id = manager['entry']
@@ -2228,28 +2232,27 @@ async def captains(interaction: discord.Interaction):
             manager_name = manager_entry['player_name']
             manager_id = manager_entry['entry']
             
-            # Find the captain (is_captain = True)
-            captain_pick = None
-            for pick in picks_data['picks']:
-                if pick['is_captain']:
-                    captain_pick = pick
-                    break
+            captain_pick = next((p for p in picks_data['picks'] if p['is_captain']), None)
             
             if captain_pick:
                 captain_id = captain_pick['element']
-                captain_player_info = all_players[captain_id]
-                captain_name = f"{captain_player_info['first_name']} {captain_player_info['second_name']}"
-                captain_info.append((manager_name, manager_id, captain_name))
+                captain_player_info = all_players.get(captain_id)
+                if captain_player_info:
+                    captain_name = f"{captain_player_info['first_name']} {captain_player_info['second_name']}"
+                    manager_link = format_manager_link(manager_name, manager_id, current_gw)
+                    captain_info.append(f"{manager_link} - **{captain_name}**")
     
+    embed = discord.Embed(
+        title=f"Captain Choices for GW {current_gw}",
+        color=discord.Color.blue()
+    )
+
     if captain_info:
-        response = f"**Captain choices for GW {current_gw}:**\n\n"
-        for manager_name, manager_id, captain_name in captain_info:
-            manager_link = format_manager_link(manager_name, manager_id, current_gw)
-            response += f"{manager_link} - **{captain_name}**\n"
+        embed.description = "\n".join(captain_info)
     else:
-        response = "No captain information found for the current gameweek."
+        embed.description = "No captain information found for the current gameweek."
     
-    await interaction.followup.send(response)
+    await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name="fixtures", description="Shows the upcoming fixtures for a team or all teams.")
@@ -2561,91 +2564,35 @@ async def shame(interaction: discord.Interaction):
     biggest_flop = max(results, key=lambda x: x['highest_transfer_out_points'])
 
     # --- Formatting Output ---
-    message_lines = [f"**🤡 Gameweek {completed_gw} Wall of Shame 🤡**\n"]
+    embed = discord.Embed(
+        title=f"🤡 Gameweek {completed_gw} Wall of Shame 🤡",
+        color=discord.Color.dark_orange()
+    )
     
+    shame_found = False
     # Most Points Benched
     if most_benched and most_benched['bench_points'] > 0:
         user_mention = f"<@{most_benched['discord_id']}>" if most_benched['discord_id'] else f"**{most_benched['manager_name']}**"
-        message_lines.append(f"**Most Points Benched:** {user_mention} ({most_benched['bench_points']} points)")
+        embed.add_field(name="Most Points Benched", value=f"{user_mention} ({most_benched['bench_points']} points)", inline=False)
+        shame_found = True
 
     # Worst Captain
     if worst_captain and worst_captain['captain_id']:
         user_mention = f"<@{worst_captain['discord_id']}>" if worst_captain['discord_id'] else f"**{worst_captain['manager_name']}**"
         captain_name = player_map.get(worst_captain['captain_id'], {}).get('web_name', 'Unknown')
-        message_lines.append(f"**Worst Captain Choice:** {user_mention} (Captain {captain_name}: {worst_captain['captain_points']} pts)")
+        embed.add_field(name="Worst Captain Choice", value=f"{user_mention} (Captain {captain_name}: {worst_captain['captain_points']} pts)", inline=False)
+        shame_found = True
 
     # Biggest Transfer Flop
     if biggest_flop and biggest_flop['highest_transfer_out_points'] > 0:
         user_mention = f"<@{biggest_flop['discord_id']}>" if biggest_flop['discord_id'] else f"**{biggest_flop['manager_name']}**"
-        message_lines.append(f"**Biggest Transfer Flop:** {user_mention} (Transferred out {biggest_flop['highest_scoring_transfer_out_name']}: {biggest_flop['highest_transfer_out_points']} pts)")
+        embed.add_field(name="Biggest Transfer Flop", value=f"{user_mention} (Transferred out {biggest_flop['highest_scoring_transfer_out_name']}: {biggest_flop['highest_transfer_out_points']} pts)", inline=False)
+        shame_found = True
     
-    # Fallback message if no shame was found
-    if len(message_lines) <= 1:
-        message_lines.append(f"🎉 No manager mistakes found for GW {completed_gw}! Everyone is a winner.")
+    if not shame_found:
+        embed.description = f"🎉 No manager mistakes found for GW {completed_gw}! Everyone is a winner."
 
-    await interaction.followup.send("\n".join(message_lines))
-
-
-@bot.tree.command(name="chips", description="Shows a matrix of chip usage for all linked managers.")
-async def chips(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    session = bot.session
-    league_id = await ensure_league_id(interaction)
-    if not league_id:
-        return
-    
-    if not interaction.guild_id:
-        await interaction.followup.send("This command can only be used in a server.", ephemeral=True)
-        return
-
-    linked_users = await asyncio.to_thread(get_linked_users, interaction.guild_id, league_id)
-    if not linked_users:
-        await interaction.followup.send("No users have claimed teams in this league yet. Use `/claim`.")
-        return
-
-    async def get_chip_usage(user):
-        fpl_id = user['fpl_team_id']
-        history_data = await fetch_fpl_api(
-            session,
-            f"{BASE_API_URL}entry/{fpl_id}/history/",
-            cache_key=f"history_entry_{fpl_id}"
-        )
-        if not history_data or 'chips' not in history_data:
-            return user['manager_name'], {}
-
-        used_chips = {chip['name'] for chip in history_data['chips']}
-        
-        # FPL has two wildcard periods. Before GW20 and after.
-        wc1_used = any(chip['name'] == 'wildcard' and chip['event'] < 21 for chip in history_data.get('chips', []))
-        wc2_used = any(chip['name'] == 'wildcard' and chip['event'] >= 21 for chip in history_data.get('chips', []))
-
-        return user['manager_name'], {
-            'WC1': wc1_used,
-            'WC2': wc2_used,
-            'FH': 'freehit' in used_chips,
-            'TC': '3xc' in used_chips,
-            'BB': 'bboost' in used_chips
-        }
-
-    tasks = [get_chip_usage(user) for user in linked_users]
-    results = await asyncio.gather(*tasks)
-
-    # Formatting
-    # Header
-    table = f"{'Manager':<15} | WC1 | WC2 | FH  | TC  | BB \n"
-    table += "-" * 43 + "\n"
-
-    # Rows
-    for manager_name, usage in sorted(results, key=lambda x: x[0]):
-        wc1_emoji = '✅' if usage.get('WC1') else '❌'
-        wc2_emoji = '✅' if usage.get('WC2') else '❌'
-        fh_emoji = '✅' if usage.get('FH') else '❌'
-        tc_emoji = '✅' if usage.get('TC') else '❌'
-        bb_emoji = '✅' if usage.get('BB') else '❌'
-        table += f"{manager_name:<15.14} | {wc1_emoji:^3} | {wc2_emoji:^3} | {fh_emoji:^3} | {tc_emoji:^3} | {bb_emoji:^3}\n"
-
-    await interaction.followup.send(f"```\n{table}```\n✅ = Used, ❌ = Available")
+    await interaction.followup.send(embed=embed)
 
 
 if __name__ == "__main__":
@@ -2653,3 +2600,4 @@ if __name__ == "__main__":
         print("!!! ERROR: DISCORD_BOT_TOKEN not found in .env file. Please create a .env file with your bot token.")
     else:
         bot.run(DISCORD_BOT_TOKEN)
+
