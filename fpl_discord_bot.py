@@ -1729,37 +1729,50 @@ async def table(interaction: discord.Interaction):
 
     manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
 
-    # --- Build Embed ---
-    embed = discord.Embed(
-        title=f"🏆 {league_data['league']['name']} - Live GW {current_gw} Table 🏆",
-        color=discord.Color.blue()
-    )
+    # --- Build Table String ---
+    def format_name(name):
+        parts = name.split()
+        if len(parts) >= 2:
+            return f"{parts[0][0]}. {parts[-1]}"
+        return name
 
     TABLE_LIMIT = 25
     
-    # Build a line-by-line description for mobile-friendliness
-    table_lines = []
-    
+    # Process manager names and find max length for padding
+    processed_managers = []
     for i, manager in enumerate(manager_details[:TABLE_LIMIT]):
-        rank = i + 1
-        rank_str = f"**{rank}.**"
-        
-        table_lines.append(
-            f"{rank_str} **{manager['name']}**: {manager['live_total_points']} total ({manager['final_gw_points']} GW)"
-        )
+        processed_managers.append({
+            'rank': i + 1,
+            'name': format_name(manager['name']),
+            'total': manager['live_total_points'],
+            'gw': manager['final_gw_points']
+        })
+    
+    # Calculate padding length
+    max_len = 0
+    if processed_managers:
+        max_len = max(len(m['name']) for m in processed_managers)
 
-    if not table_lines:
-        embed.description = "Could not generate table for this league."
-    else:
-        embed.description = "\n".join(table_lines)
+    # Build the table line by line
+    table_lines = []
+    header = f"**🏆 {league_data['league']['name']} - Live GW {current_gw} Table 🏆**"
+    table_lines.append("```")
+    # Header for the code block
+    table_lines.append(f"{'#':<3} {'Manager'.ljust(max_len)}  {'GW':>4}  {'Total':>6}")
+    table_lines.append("-" * (max_len + 18))
+
+    for m in processed_managers:
+        padded_name = m['name'].ljust(max_len)
+        table_lines.append(f"{str(m['rank']):<3} {padded_name}  {m['gw']:>4}  {m['total']:>6}")
+
+    table_lines.append("```")
 
     has_next_page = league_data.get('standings', {}).get('has_next', False)
     if len(manager_details) > TABLE_LIMIT or has_next_page:
         league_url = f"https://fantasy.premierleague.com/leagues/{league_id}/standings/c"
-        # Add a footer instead of appending to description to keep it clean
-        embed.set_footer(text=f"Only showing top {TABLE_LIMIT}. View the full table for more details.")
+        table_lines.append(f"Only showing top {TABLE_LIMIT}. View full table at <{league_url}>")
 
-    await interaction.followup.send(embed=embed)
+    await interaction.followup.send("\n".join(table_lines))
 
 @bot.tree.command(name="player", description="Shows which managers in the league own a specific player.")
 @app_commands.describe(player="Select the player to check ownership for.")
