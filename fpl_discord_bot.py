@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import aiohttp
 import os
 import json
@@ -53,6 +53,12 @@ def init_database():
                 team_name TEXT NOT NULL,
                 manager_name TEXT NOT NULL,
                 discord_user_id TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS goal_subscriptions (
+                channel_id TEXT PRIMARY KEY,
+                league_id INTEGER NOT NULL
             )
         """)
         con.commit()
@@ -130,6 +136,57 @@ def get_team_by_fpl_id(fpl_team_id: int):
         return cur.fetchone()
 
 
+def get_linked_users(league_id: int):
+    """Gets a list of all linked users for a league."""
+    with sqlite3.connect(DB_PATH) as con:
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute("""
+            SELECT fpl_team_id, discord_user_id, manager_name FROM league_teams
+            WHERE league_id = ? AND discord_user_id IS NOT NULL
+        """, (league_id,))
+        return cur.fetchall()
+
+def get_all_league_teams(league_id: int):
+    """Gets a list of all teams for a league."""
+    with sqlite3.connect(DB_PATH) as con:
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute("""
+            SELECT fpl_team_id, discord_user_id, manager_name FROM league_teams
+            WHERE league_id = ?
+        """, (league_id,))
+        return cur.fetchall()
+
+
+def is_goal_subscribed(channel_id: int):
+    """Checks if a channel is subscribed to goal alerts."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        cur.execute("SELECT 1 FROM goal_subscriptions WHERE channel_id = ?", (str(channel_id),))
+        return cur.fetchone() is not None
+
+def add_goal_subscription(channel_id: int, league_id: int):
+    """Adds a channel to the goal alert subscription list."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        cur.execute("INSERT INTO goal_subscriptions (channel_id, league_id) VALUES (?, ?)", (str(channel_id), league_id))
+        con.commit()
+
+def remove_goal_subscription(channel_id: int):
+    """Removes a channel from the goal alert subscription list."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        cur.execute("DELETE FROM goal_subscriptions WHERE channel_id = ?", (str(channel_id),))
+        con.commit()
+
+def get_all_goal_subscriptions():
+    """Gets all channel IDs and their league IDs subscribed to goal alerts."""
+    with sqlite3.connect(DB_PATH) as con:
+        cur = con.cursor()
+        # Return as a dictionary for easy league_id lookup
+        cur.execute("SELECT channel_id, league_id FROM goal_subscriptions")
+        return {row[0]: row[1] for row in cur.fetchall()}
 
 
 def _load_cached_json_sync(path: Path):
@@ -216,17 +273,116 @@ class FPLBot(commands.Bot):
         intents.members = True
         super().__init__(command_prefix="!", intents=intents)
         self.session = None
+        self.last_known_goals = {}
+        self.picks_cache = {} # Cache for manager picks
 
     async def setup_hook(self):
         init_database()
         self.session = aiohttp.ClientSession()
         self.api_semaphore = asyncio.Semaphore(10)
+        self.goal_check_loop.start()
         await self.tree.sync()
         print(f"Synced slash commands for {self.user}.")
+
+    @tasks.loop(seconds=60)
+    async def goal_check_loop(self):
+        await self.wait_until_ready()
+        
+        # Check if any gameweek is live
+        bootstrap_data = await fetch_fpl_api(self.session, f"{BASE_API_URL}bootstrap-static/")
+        if not bootstrap_data or 'events' not in bootstrap_data:
+            return
+
+        live_event = next((event for event in bootstrap_data['events'] if event['is_current']), None)
+        if not live_event:
+            self.last_known_goals = {} # Reset cache when no GW is live
+            return
+        
+        current_gw = live_event['id']
+        
+        # Fetch live data for the current gameweek
+        live_data = await fetch_fpl_api(self.session, f"{BASE_API_URL}event/{current_gw}/live/")
+        if not live_data or 'elements' not in live_data:
+            return
+
+        # Initialize cache if it's empty
+        if not self.last_known_goals:
+            for player_stats in live_data['elements']:
+                self.last_known_goals[player_stats['id']] = player_stats['stats']['goals_scored']
+            print("Initialized goal cache.")
+            return # Don't send alerts on first run
+
+        # Get all subscribed channels
+        subscriptions = await asyncio.to_thread(get_all_goal_subscriptions)
+        if not subscriptions:
+            return
+
+        # --- Check for new goals ---
+        for player_stats in live_data['elements']:
+            player_id = player_stats['id']
+            new_goals = player_stats['stats']['goals_scored']
+            old_goals = self.last_known_goals.get(player_id, 0)
+
+            if new_goals > old_goals:
+                goals_scored = new_goals - old_goals
+                self.last_known_goals[player_id] = new_goals # Update cache
+                
+                # --- A goal has been scored! ---
+                player_info = next((p for p in bootstrap_data['elements'] if p['id'] == player_id), None)
+                if not player_info: continue
+
+                # Get opponent
+                team_id = player_info['team']
+                fixture = next((f for f in live_data['fixtures'] if f['team_h'] == team_id or f['team_a'] == team_id), None)
+                if not fixture: continue
+                
+                opponent_id = fixture['team_a'] if fixture['team_h'] == team_id else fixture['team_h']
+                opponent_team = next((t for t in bootstrap_data['teams'] if t['id'] == opponent_id), None)
+                opponent_name = opponent_team['name'] if opponent_team else "Unknown"
+                player_team = next((t for t in bootstrap_data['teams'] if t['id'] == team_id), None)
+
+
+                # --- Find owners and broadcast ---
+                for channel_id, league_id in subscriptions.items():
+                    channel = self.get_channel(int(channel_id))
+                    if not channel: continue
+
+                    # Update picks cache for this league if needed for the current GW
+                    if self.picks_cache.get('gw') != current_gw or league_id not in self.picks_cache:
+                        self.picks_cache = {'gw': current_gw, league_id: {}}
+                        linked_users = await asyncio.to_thread(get_linked_users, league_id)
+                        for user in linked_users:
+                            picks = await fetch_fpl_api(self.session, f"{BASE_API_URL}entry/{user['fpl_team_id']}/event/{current_gw}/picks/")
+                            if picks:
+                                self.picks_cache[league_id][user['discord_user_id']] = picks
+                    
+                    # Find owners in the channel's league
+                    owners, benched = [], []
+                    for user_id, picks in self.picks_cache.get(league_id, {}).items():
+                        for pick in picks['picks']:
+                            if pick['element'] == player_id:
+                                if pick['position'] <= 11:
+                                    owners.append(f"<@{user_id}>")
+                                else:
+                                    benched.append(f"<@{user_id}>")
+                    
+                    # Build and send embed
+                    embed = discord.Embed(
+                        title=f"⚽ GOAL: {player_info['web_name']} ({player_team['short_name']})",
+                        description=f"Scored {goals_scored} goal(s) against **{opponent_name}**!",
+                        color=discord.Color.green()
+                    )
+                    if owners:
+                        embed.add_field(name="Owned By", value=", ".join(owners))
+                    if benched:
+                        embed.add_field(name="Benched By (🤡)", value=", ".join(benched))
+                    
+                    await channel.send(embed=embed)
 
     async def close(self):
         if self.session:
             await self.session.close()
+        self.goal_check_loop.cancel()
         await super().close()
 
     async def on_ready(self):
@@ -308,14 +464,15 @@ async def get_league_managers(session, league_id):
     return {}
 
 # --- NEW REFACTORED HELPER FOR LIVE POINT CALCULATION ---
-async def get_live_manager_details(session, manager_entry, current_gw, live_points_map):
-    """Fetches picks/history for a manager and calculates their live score, accounting for chips."""
+async def get_live_manager_details(session, manager_entry, current_gw, live_points_map, is_finished=False):
+    """Fetches picks/history for a manager and calculates their score, handling auto-subs for finished GWs."""
     manager_id = manager_entry['entry']
     picks_task = fetch_fpl_api(
         session,
         f"{BASE_API_URL}entry/{manager_id}/event/{current_gw}/picks/",
         cache_key=f"picks_entry_{manager_id}",
-        cache_gw=current_gw
+        cache_gw=current_gw,
+        force_refresh=is_finished  # Refresh if the gameweek is over to get final subs/points
     )
     history_task = fetch_fpl_api(
         session,
@@ -328,20 +485,69 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
     if not picks_data or not history_data:
         return None
 
-    # Determine which players' points to count based on active chip
-    active_chip = picks_data.get('active_chip')
-    players_to_score = []
-    if active_chip == 'bboost':
-        players_to_score = picks_data['picks']  # Count all 15 players for Bench Boost
+    # --- Determine final GW points ---
+    final_gw_points = 0
+    scoring_picks = []
+
+    # The API's official points are the source of truth if available for a finished GW
+    if is_finished and picks_data['entry_history']['points'] > 0:
+        final_gw_points = picks_data['entry_history']['points']
+        
+        # Determine scoring picks for the image based on auto-subs
+        automatic_subs = picks_data.get('automatic_subs', [])
+        subs_in = {sub['element_in'] for sub in automatic_subs}
+        subs_out = {sub['element_out'] for sub in automatic_subs}
+        
+        for p in picks_data['picks']:
+            is_starter = p['position'] <= 11
+            if (is_starter and p['element'] not in subs_out) or \
+               (not is_starter and p['element'] in subs_in):
+                scoring_picks.append(p)
     else:
-        players_to_score = [p for p in picks_data['picks'] if p['position'] <= 11]  # Count starting 11
+        # --- Manual calculation (for live GWs or when official points are not ready) ---
+        
+        # Check captain status first
+        captain_pick = next((p for p in picks_data['picks'] if p['is_captain']), None)
+        captain_played = True
+        if captain_pick:
+            captain_minutes = live_points_map.get(captain_pick['element'], {}).get('minutes', 0)
+            if captain_minutes == 0:
+                captain_played = False
 
-    # Calculate points
-    live_gw_points = sum(live_points_map.get(p['element'], {}).get('total_points', 0) * p['multiplier'] for p in players_to_score)
-    transfer_cost = picks_data['entry_history']['event_transfers_cost']
-    final_gw_points = live_gw_points - transfer_cost
+        # Determine scoring players
+        if is_finished:
+            automatic_subs = picks_data.get('automatic_subs', [])
+            subs_in = {sub['element_in'] for sub in automatic_subs}
+            subs_out = {sub['element_out'] for sub in automatic_subs}
+            for p in picks_data['picks']:
+                is_starter = p['position'] <= 11
+                if (is_starter and p['element'] not in subs_out) or \
+                   (not is_starter and p['element'] in subs_in):
+                    scoring_picks.append(p)
+        else: # Live GW
+            active_chip = picks_data.get('active_chip')
+            if active_chip == 'bboost':
+                scoring_picks = picks_data['picks']
+            else:
+                scoring_picks = [p for p in picks_data['picks'] if p['position'] <= 11]
+        
+        # Calculate points from the determined scoring players
+        gw_points = 0
+        for p in scoring_picks:
+            player_points = live_points_map.get(p['element'], {}).get('total_points', 0)
+            
+            multiplier = 1
+            if p['is_captain']:
+                multiplier = 2 if captain_played else 1
+            elif p['is_vice_captain'] and not captain_played:
+                multiplier = 2
 
-    # Calculate total points
+            gw_points += player_points * multiplier
+
+        transfer_cost = picks_data['entry_history']['event_transfers_cost']
+        final_gw_points = gw_points - transfer_cost
+
+    # --- Calculate total points ---
     pre_gw_total = 0
     if current_gw > 1:
         prev_gw_history = next((gw for gw in history_data['current'] if gw['event'] == current_gw - 1), None)
@@ -350,7 +556,11 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
     
     live_total_points = pre_gw_total + final_gw_points
 
-    # Calculate players played for the table view (always just the starting XI)
+    # --- Final data ---
+    # The 'picks' data needs to be passed for image generation
+    picks_data['scoring_picks'] = scoring_picks
+    
+    # Calculate players played for the table view (always just the starting XI for simplicity)
     starters = [p for p in picks_data['picks'] if p['position'] <= 11]
     players_played_count = sum(1 for p in starters if live_points_map.get(p['element'], {}).get('minutes', 0) > 0)
 
@@ -468,7 +678,7 @@ def calculate_player_coordinates(picks, all_players):
 
 POINTS_BOX_EXTRA_PADDING = 4
 
-def generate_team_image(fpl_data, summary_data):
+def generate_team_image(fpl_data, summary_data, is_finished=False):
     try:
         pitch = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
         base_layer = Image.new("RGBA", pitch.size, "#1A1A1E")
@@ -488,17 +698,54 @@ def generate_team_image(fpl_data, summary_data):
 
     all_players = {p['id']: p for p in fpl_data['bootstrap']['elements']}
     all_teams = {t['id']: t for t in fpl_data['bootstrap']['teams']}
-    live_points = {p['id']: p['stats']['total_points'] for p in fpl_data['live']['elements']}
+    live_points = {p['id']: p['stats'] for p in fpl_data['live']['elements']}
     coordinates = calculate_player_coordinates(fpl_data['picks']['picks'], all_players)
+
+    # Determine the final set of scoring players from the provided data
+    scoring_picks_data = fpl_data['picks'].get('scoring_picks', [])
+    scoring_player_ids = {p['element'] for p in scoring_picks_data}
 
     for player_pick in fpl_data['picks']['picks']:
         player_id = player_pick['element']
         player_info = all_players[player_id]
         player_name = player_info['web_name']
-        base_points = live_points.get(player_id, 0)
-        multiplier = player_pick.get('multiplier', 1)
-        is_bench_player = player_pick['position'] > 11 and multiplier == 0
-        display_points = base_points if is_bench_player else base_points * multiplier
+        base_points = live_points.get(player_id, {}).get('total_points', 0)
+        
+        is_starter = player_pick['position'] <= 11
+        was_subbed_out = is_starter and player_id not in scoring_player_ids and is_finished
+        was_subbed_in = not is_starter and player_id in scoring_player_ids and is_finished
+
+        # Determine points to display
+        final_multiplier = 0
+        if player_id in scoring_player_ids:
+            # Find the multiplier from the scoring_picks data, which has correct C/VC logic
+            scoring_pick_details = next((p for p in scoring_picks_data if p['element'] == player_id), None)
+            final_multiplier = scoring_pick_details.get('multiplier', 1) if scoring_pick_details else 1
+            
+            # Account for VC promotion
+            captain_pick = next((p for p in fpl_data['picks']['picks'] if p['is_captain']), None)
+            captain_played = True
+            if is_finished and captain_pick:
+                captain_minutes = live_points.get(captain_pick['element'], {}).get('minutes', 0)
+                if captain_minutes == 0:
+                    captain_played = False
+            
+            if player_pick['is_captain'] and not captain_played:
+                final_multiplier = 1 # Captain didn't play, gets 1x
+            if player_pick['is_vice_captain'] and not captain_played:
+                final_multiplier = 2 # VC gets promoted
+
+        display_points = base_points * final_multiplier
+        points_text = f"{display_points} pts"
+        
+        # For non-scoring bench players, show their base points
+        if not is_starter and not was_subbed_in:
+            points_text = f"{base_points} pts"
+        # For subbed out starters, show their base points but they won't be summed
+        if was_subbed_out:
+            points_text = f"({base_points}) pts"
+
+        # --- Drawing logic ---
         asset_img = None
         asset_size = (88, 112)
         headshot_path = os.path.join(HEADSHOTS_DIR, f"{player_name.replace(' ', '_')}_{player_id}.png")
@@ -517,9 +764,18 @@ def generate_team_image(fpl_data, summary_data):
         asset_img = asset_img.resize(asset_size, Image.LANCZOS)
         x, y = coordinates[player_id]
         paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
+        
+        # Add visual indicators for subs
+        if was_subbed_out:
+            red_overlay = Image.new("RGBA", asset_img.size, (255, 0, 0, 80))
+            asset_img = Image.alpha_composite(asset_img, red_overlay)
+        if was_subbed_in:
+            green_overlay = Image.new("RGBA", asset_img.size, (0, 255, 0, 80))
+            asset_img = Image.alpha_composite(asset_img, green_overlay)
+
         background.paste(asset_img, (paste_x, paste_y), asset_img)
 
-        name_text, points_text = player_name, f"{display_points} pts"
+        name_text = player_name
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
         box_width = max(name_bbox[2], points_bbox[2]) + 10
@@ -721,6 +977,34 @@ def generate_dreamteam_image(fpl_data, summary_data):
     return img_byte_arr
 
 # --- DISCORD SLASH COMMANDS ---
+
+@bot.tree.command(name="toggle_goals", description="Enable or disable live goal alerts in this channel.")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def toggle_goals(interaction: discord.Interaction):
+    """Toggles goal alerts for the current channel."""
+    await interaction.response.defer(ephemeral=True)
+
+    league_id = get_league_id_for_context(interaction)
+    if not league_id:
+        await interaction.followup.send("A league must be configured for this channel or server first. Use `/setleague`.")
+        return
+
+    channel_id = interaction.channel_id
+    if await asyncio.to_thread(is_goal_subscribed, channel_id):
+        await asyncio.to_thread(remove_goal_subscription, channel_id)
+        await interaction.followup.send("🔴 Live goal alerts disabled for this channel.")
+    else:
+        await asyncio.to_thread(add_goal_subscription, channel_id, league_id)
+        await interaction.followup.send("🟢 Live goal alerts enabled. I will post goals as they happen.")
+
+@toggle_goals.error
+async def toggle_goals_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("You need the `Manage Channels` permission to use this command.", ephemeral=True)
+    else:
+        await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
+        raise error
+
 
 @bot.tree.command(name="setleague", description="Configure which FPL league this server or channel uses.")
 @app_commands.describe(league_id="The FPL league ID (numbers only).",
@@ -976,22 +1260,26 @@ async def team(interaction: discord.Interaction, manager: str = None):
     if not league_id:
         return
 
-    current_gw = await get_current_gameweek(session)
-    if not current_gw:
-        await interaction.followup.send("Could not determine the current gameweek.")
+    # Fetch bootstrap to determine GW status
+    bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
+    if not bootstrap_data:
+        await interaction.followup.send("Could not fetch FPL bootstrap data.")
         return
 
-    bootstrap_data = await fetch_fpl_api(
-        session,
-        f"{BASE_API_URL}bootstrap-static/",
-        cache_key="bootstrap",
-        cache_gw=current_gw
-    )
+    current_gw_event = next((event for event in bootstrap_data.get('events', []) if event['is_current']), None)
+    if not current_gw_event:
+        await interaction.followup.send("Could not determine the current gameweek.")
+        return
+        
+    current_gw = current_gw_event['id']
+    is_finished = current_gw_event['finished']
+
     live_data = await fetch_fpl_api(
         session,
         f"{BASE_API_URL}event/{current_gw}/live/",
-        cache_key="event_live",
-        cache_gw=current_gw
+        cache_key=f"event_live_gw{current_gw}",
+        cache_gw=current_gw,
+        force_refresh=True
     )
     league_data = await fetch_fpl_api(
         session,
@@ -1000,13 +1288,13 @@ async def team(interaction: discord.Interaction, manager: str = None):
         cache_gw=current_gw
     )
 
-    if not all([bootstrap_data, live_data, league_data]):
+    if not all([live_data, league_data]):
         await interaction.followup.send("Failed to fetch essential FPL data. Please try again later.")
         return
 
     live_points_map = {p['id']: p['stats'] for p in live_data['elements']}
     
-    tasks = [get_live_manager_details(session, mgr, current_gw, live_points_map) for mgr in league_data['standings']['results']]
+    tasks = [get_live_manager_details(session, mgr, current_gw, live_points_map, is_finished=is_finished) for mgr in league_data['standings']['results']]
     all_manager_data = await asyncio.gather(*tasks)
     
     manager_live_scores = [d for d in all_manager_data if d is not None]
@@ -1036,7 +1324,7 @@ async def team(interaction: discord.Interaction, manager: str = None):
         "picks": selected_manager_details['picks_data']
     }
     
-    image_bytes = await asyncio.to_thread(generate_team_image, fpl_data_for_image, summary_data)
+    image_bytes = await asyncio.to_thread(generate_team_image, fpl_data_for_image, summary_data, is_finished=is_finished)
     if image_bytes:
         file = discord.File(fp=image_bytes, filename="fpl_team.png")
         manager_name = selected_manager_details.get('name', 'Manager')
@@ -1067,10 +1355,21 @@ async def table(interaction: discord.Interaction):
     if not league_id:
         return
 
-    current_gw = await get_current_gameweek(session)
-    if not current_gw:
-        await interaction.followup.send("Could not determine the current gameweek.")
+    bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
+    if not bootstrap_data:
+        await interaction.followup.send("Could not fetch FPL bootstrap data.")
         return
+
+    current_gw_event = next((event for event in bootstrap_data.get('events', []) if event['is_current']), None)
+    if not current_gw_event:
+        # If no current GW, try to get the last completed one for a final table
+        current_gw_event = next((event for event in sorted(bootstrap_data.get('events', []), key=lambda x: x['id'], reverse=True) if event['finished']), None)
+        if not current_gw_event:
+            await interaction.followup.send("Could not determine the current or last gameweek.")
+            return
+
+    current_gw = current_gw_event['id']
+    is_finished = current_gw_event['finished']
         
     league_data = await fetch_fpl_api(
         session,
@@ -1082,7 +1381,7 @@ async def table(interaction: discord.Interaction):
     live_data = await fetch_fpl_api(
         session,
         f"{BASE_API_URL}event/{current_gw}/live/",
-        cache_key="event_live",
+        cache_key=f"event_live_gw{current_gw}",
         cache_gw=current_gw,
         force_refresh=True
     )
@@ -1093,7 +1392,7 @@ async def table(interaction: discord.Interaction):
 
     live_points_map = {p['id']: p['stats'] for p in live_data['elements']}
     
-    tasks = [get_live_manager_details(session, manager, current_gw, live_points_map) for manager in league_data['standings']['results']]
+    tasks = [get_live_manager_details(session, manager, current_gw, live_points_map, is_finished=is_finished) for manager in league_data['standings']['results']]
     manager_details = [res for res in await asyncio.gather(*tasks) if res]
 
     manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
@@ -1324,8 +1623,9 @@ async def dreamteam(interaction: discord.Interaction):
     completed_gw_data = await fetch_fpl_api(
         session,
         f"{BASE_API_URL}event/{last_completed_gw}/live/",
-        cache_key="event_live",
-        cache_gw=last_completed_gw
+        cache_key=f"event_live_gw{last_completed_gw}",
+        cache_gw=last_completed_gw,
+        force_refresh=True
     )
 
     if not all([bootstrap_data, league_data, completed_gw_data]):
@@ -1601,6 +1901,381 @@ async def captains(interaction: discord.Interaction):
         response = "No captain information found for the current gameweek."
     
     await interaction.followup.send(response)
+
+
+@bot.tree.command(name="fixtures", description="Shows the upcoming fixtures for a team or all teams.")
+@app_commands.describe(team="The team to show fixtures for. Leave blank for all teams.")
+async def fixtures(interaction: discord.Interaction, team: str = None):
+    await interaction.response.defer()
+
+    session = bot.session
+    current_gw = await get_current_gameweek(session)
+    if not current_gw:
+        await interaction.followup.send("Could not determine the current gameweek.")
+        return
+
+    bootstrap_data = await fetch_fpl_api(
+        session,
+        f"{BASE_API_URL}bootstrap-static/",
+        cache_key="bootstrap"
+    )
+    fixtures_data = await fetch_fpl_api(
+        session,
+        f"{BASE_API_URL}fixtures/",
+        cache_key="fixtures"
+    )
+
+    if not bootstrap_data or not fixtures_data:
+        await interaction.followup.send("Failed to fetch FPL data. Please try again later.")
+        return
+
+    teams_map = {t['id']: t for t in bootstrap_data['teams']}
+    
+    embed = discord.Embed(title="Upcoming Fixtures", color=discord.Color.blue())
+
+    team_id_to_show = int(team) if team else None
+
+    def get_fdr_emoji(difficulty):
+        if difficulty <= 2:
+            return "🟩"
+        elif difficulty == 3:
+            return "⬜"
+        elif difficulty == 4:
+            return "🟧"
+        else:
+            return "🟥"
+
+    upcoming_fixtures = [
+        f for f in fixtures_data 
+        if not f.get('finished', True) and f.get('event') and current_gw <= f['event'] < current_gw + 5
+    ]
+    
+    if team_id_to_show:
+        team_name = teams_map[team_id_to_show]['name']
+        team_fixtures = [f for f in upcoming_fixtures if f['team_h'] == team_id_to_show or f['team_a'] == team_id_to_show]
+        
+        fixture_lines = []
+        for f in sorted(team_fixtures, key=lambda x: x['event']):
+            is_home = f['team_h'] == team_id_to_show
+            opponent = teams_map[f['team_a'] if is_home else f['team_h']]['short_name']
+            difficulty = f['team_h_difficulty'] if is_home else f['team_a_difficulty']
+            fdr_emoji = get_fdr_emoji(difficulty)
+            venue = "(H)" if is_home else "(A)"
+            fixture_lines.append(f"GW{f['event']}: vs {opponent} {venue} {fdr_emoji}")
+        
+        if fixture_lines:
+            embed.add_field(name=team_name, value="\n".join(fixture_lines), inline=False)
+        else:
+            embed.description = f"No upcoming fixtures found for {team_name} in the next 4 gameweeks."
+
+    else: # All teams
+        fixtures_by_team = {team_id: [] for team_id in teams_map}
+        for f in upcoming_fixtures:
+            # Home team
+            h_opponent = teams_map[f['team_a']]['short_name']
+            h_fdr = get_fdr_emoji(f['team_h_difficulty'])
+            fixtures_by_team[f['team_h']].append(f"GW{f['event']}:{h_opponent}(H){h_fdr}")
+            # Away team
+            a_opponent = teams_map[f['team_h']]['short_name']
+            a_fdr = get_fdr_emoji(f['team_a_difficulty'])
+            fixtures_by_team[f['team_a']].append(f"GW{f['event']}:{a_opponent}(A){a_fdr}")
+
+        # Sort and add to embed
+        for team_id, team_data in sorted(teams_map.items(), key=lambda x: x[1]['name']):
+            if fixtures_by_team[team_id]:
+                # Sort this team's fixtures by gameweek
+                sorted_fixtures = sorted(fixtures_by_team[team_id], key=lambda x: int(x.split(':')[0][2:]))
+                embed.add_field(name=team_data['name'], value=" ".join(sorted_fixtures))
+
+    await interaction.followup.send(embed=embed)
+
+
+@fixtures.autocomplete('team')
+async def fixtures_autocomplete(interaction: discord.Interaction, current: str):
+    session = bot.session
+    bootstrap_data = await fetch_fpl_api(
+        session,
+        f"{BASE_API_URL}bootstrap-static/",
+        cache_key="bootstrap_autocomplete"
+    )
+    if not bootstrap_data:
+        return []
+    
+    all_teams = bootstrap_data['teams']
+    choices = []
+    
+    for team in all_teams:
+        team_name = team['name']
+        if current.lower() in team_name.lower():
+            choices.append(app_commands.Choice(name=team_name, value=str(team['id'])))
+    
+    return sorted(choices, key=lambda x: x.name)[:25]
+
+
+@bot.tree.command(name="h2h", description="Compare two FPL teams for the current gameweek.")
+@app_commands.describe(manager_a="The first manager to compare.", manager_b="The second manager to compare.")
+@app_commands.autocomplete(manager_a=team_autocomplete)
+@app_commands.autocomplete(manager_b=team_autocomplete)
+async def h2h(interaction: discord.Interaction, manager_a: str, manager_b: str):
+    await interaction.response.defer()
+
+    if manager_a == manager_b:
+        await interaction.followup.send("You can't compare a manager against themselves.", ephemeral=True)
+        return
+
+    # Get FPL IDs and names
+    p1_fpl_id = int(manager_a)
+    p2_fpl_id = int(manager_b)
+    
+    manager1_data = await asyncio.to_thread(get_team_by_fpl_id, p1_fpl_id)
+    manager2_data = await asyncio.to_thread(get_team_by_fpl_id, p2_fpl_id)
+
+    if not manager1_data or not manager2_data:
+        await interaction.followup.send("Could not find one or both of the selected managers.", ephemeral=True)
+        return
+
+    player1_name = manager1_data['manager_name']
+    player2_name = manager2_data['manager_name']
+
+    session = bot.session
+    current_gw = await get_current_gameweek(session)
+    if not current_gw:
+        await interaction.followup.send("Could not determine the current gameweek.")
+        return
+
+    # Fetch picks for both managers
+    async def get_picks(fpl_id):
+        return await fetch_fpl_api(
+            session,
+            f"{BASE_API_URL}entry/{fpl_id}/event/{current_gw}/picks/",
+            cache_key=f"picks_entry_{fpl_id}",
+            cache_gw=current_gw
+        )
+
+    picks1_data, picks2_data = await asyncio.gather(get_picks(p1_fpl_id), get_picks(p2_fpl_id))
+
+    if not picks1_data or not picks2_data:
+        await interaction.followup.send("Could not fetch player picks. Please try again later.")
+        return
+
+    team1_players = {p['element'] for p in picks1_data['picks']}
+    team2_players = {p['element'] for p in picks2_data['picks']}
+
+    common_players = team1_players.intersection(team2_players)
+    diffs1 = team1_players.difference(team2_players)
+    diffs2 = team2_players.difference(team1_players)
+
+    # Get player names
+    bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/", cache_key="bootstrap")
+    if not bootstrap_data:
+        await interaction.followup.send("Could not fetch player data.")
+        return
+    player_map = {p['id']: p['web_name'] for p in bootstrap_data['elements']}
+
+    def get_player_names(ids):
+        return [player_map.get(p_id, "Unknown") for p_id in ids]
+
+    diffs1_names = sorted(get_player_names(diffs1))
+    diffs2_names = sorted(get_player_names(diffs2))
+
+    embed = discord.Embed(
+        title=f"Head to Head: {player1_name} vs {player2_name}",
+        color=discord.Color.gold()
+    )
+    embed.set_footer(text=f"{len(common_players)} players in common.")
+
+    embed.add_field(name=f"{player1_name}'s Differentials", value="\n".join(diffs1_names) or "None", inline=True)
+    embed.add_field(name=f"{player2_name}'s Differentials", value="\n".join(diffs2_names) or "None", inline=True)
+    
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="shame", description="Highlights the biggest manager mistakes from the last completed gameweek.")
+async def shame(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    session = bot.session
+    league_id = await ensure_league_id(interaction)
+    if not league_id:
+        return
+
+    completed_gw = await get_last_completed_gameweek(session)
+    if not completed_gw:
+        await interaction.followup.send("Could not determine the last completed gameweek.")
+        return
+
+    # --- Data Fetching ---
+    bootstrap_data, gw_data = await asyncio.gather(
+        fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/", cache_key="bootstrap"),
+        fetch_fpl_api(session, f"{BASE_API_URL}event/{completed_gw}/live/", cache_key=f"event_live_gw{completed_gw}", cache_gw=completed_gw)
+    )
+    if not bootstrap_data or not gw_data:
+        await interaction.followup.send("Failed to fetch FPL data.")
+        return
+        
+    player_map = {p['id']: p for p in bootstrap_data['elements']}
+    points_map = {p['id']: p['stats'] for p in gw_data['elements']}
+    
+    all_league_teams = await asyncio.to_thread(get_all_league_teams, league_id)
+    if not all_league_teams:
+        await interaction.followup.send("No teams found for this league.")
+        return
+
+    all_league_teams = all_league_teams[:25]
+        
+    # --- Metric Calculation ---
+    manager_metrics = []
+    
+    async def get_manager_metrics(user):
+        fpl_id = user['fpl_team_id']
+        
+        picks_data, transfers_data = await asyncio.gather(
+            fetch_fpl_api(session, f"{BASE_API_URL}entry/{fpl_id}/event/{completed_gw}/picks/", cache_key=f"picks_entry_{fpl_id}", cache_gw=completed_gw),
+            fetch_fpl_api(session, f"{BASE_API_URL}entry/{fpl_id}/transfers/", cache_key=f"transfers_entry_{fpl_id}", cache_gw=completed_gw)
+        )
+
+        if not picks_data or 'picks' not in picks_data:
+            return None
+
+        # 1. Bench Points
+        bench_points = sum(
+            points_map.get(p['element'], {}).get('total_points', 0)
+            for p in picks_data['picks'] if p['position'] > 11
+        )
+
+        # 2. Captain Points
+        captain_pick = next((p for p in picks_data['picks'] if p['is_captain']), None)
+        vice_pick = next((p for p in picks_data['picks'] if p['is_vice_captain']), None)
+        
+        effective_captain_id = None
+        effective_captain_points = -1
+
+        if captain_pick:
+            captain_minutes = points_map.get(captain_pick['element'], {}).get('minutes', 0)
+            if captain_minutes == 0 and vice_pick:
+                effective_captain_id = vice_pick['element']
+            else:
+                effective_captain_id = captain_pick['element']
+        
+        if effective_captain_id:
+            effective_captain_points = points_map.get(effective_captain_id, {}).get('total_points', 0)
+
+        # 3. Transfer Flop
+        highest_transfer_out_points = -1
+        highest_scoring_transfer_out_name = ""
+        if transfers_data:
+            transfers_this_week = [t for t in transfers_data if t.get("event") == completed_gw]
+            for transfer in transfers_this_week:
+                out_player_id = transfer['element_out']
+                out_player_points = points_map.get(out_player_id, {}).get('total_points', 0)
+                if out_player_points > highest_transfer_out_points:
+                    highest_transfer_out_points = out_player_points
+                    highest_scoring_transfer_out_name = player_map.get(out_player_id, {}).get('web_name', 'Unknown')
+        
+        return {
+            "discord_id": user['discord_user_id'],
+            "manager_name": user['manager_name'],
+            "bench_points": bench_points,
+            "captain_id": effective_captain_id,
+            "captain_points": effective_captain_points,
+            "highest_transfer_out_points": highest_transfer_out_points,
+            "highest_scoring_transfer_out_name": highest_scoring_transfer_out_name
+        }
+
+    tasks = [get_manager_metrics(user) for user in all_league_teams]
+    results = [res for res in await asyncio.gather(*tasks) if res is not None]
+
+    if not results:
+        await interaction.followup.send(f"Could not calculate shame metrics for GW {completed_gw}.")
+        return
+
+    # --- Find the "Winners" ---
+    most_benched = max(results, key=lambda x: x['bench_points'])
+    worst_captain = min(results, key=lambda x: x['captain_points'])
+    biggest_flop = max(results, key=lambda x: x['highest_transfer_out_points'])
+
+    # --- Formatting Output ---
+    message_lines = [f"**🤡 Gameweek {completed_gw} Wall of Shame 🤡**\n"]
+    
+    # Most Points Benched
+    if most_benched and most_benched['bench_points'] > 0:
+        user_mention = f"<@{most_benched['discord_id']}>" if most_benched['discord_id'] else f"**{most_benched['manager_name']}**"
+        message_lines.append(f"**Most Points Benched:** {user_mention} ({most_benched['bench_points']} points)")
+
+    # Worst Captain
+    if worst_captain and worst_captain['captain_id']:
+        user_mention = f"<@{worst_captain['discord_id']}>" if worst_captain['discord_id'] else f"**{worst_captain['manager_name']}**"
+        captain_name = player_map.get(worst_captain['captain_id'], {}).get('web_name', 'Unknown')
+        message_lines.append(f"**Worst Captain Choice:** {user_mention} (Captain {captain_name}: {worst_captain['captain_points']} pts)")
+
+    # Biggest Transfer Flop
+    if biggest_flop and biggest_flop['highest_transfer_out_points'] > 0:
+        user_mention = f"<@{biggest_flop['discord_id']}>" if biggest_flop['discord_id'] else f"**{biggest_flop['manager_name']}**"
+        message_lines.append(f"**Biggest Transfer Flop:** {user_mention} (Transferred out {biggest_flop['highest_scoring_transfer_out_name']}: {biggest_flop['highest_transfer_out_points']} pts)")
+    
+    # Fallback message if no shame was found
+    if len(message_lines) <= 1:
+        message_lines.append(f"🎉 No manager mistakes found for GW {completed_gw}! Everyone is a winner.")
+
+    await interaction.followup.send("\n".join(message_lines))
+
+
+@bot.tree.command(name="chips", description="Shows a matrix of chip usage for all linked managers.")
+async def chips(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    session = bot.session
+    league_id = await ensure_league_id(interaction)
+    if not league_id:
+        return
+
+    linked_users = await asyncio.to_thread(get_linked_users, league_id)
+    if not linked_users:
+        await interaction.followup.send("No users have claimed teams in this league yet. Use `/claim`.")
+        return
+
+    async def get_chip_usage(user):
+        fpl_id = user['fpl_team_id']
+        history_data = await fetch_fpl_api(
+            session,
+            f"{BASE_API_URL}entry/{fpl_id}/history/",
+            cache_key=f"history_entry_{fpl_id}"
+        )
+        if not history_data or 'chips' not in history_data:
+            return user['manager_name'], {}
+
+        used_chips = {chip['name'] for chip in history_data['chips']}
+        
+        # FPL has two wildcard periods. Before GW20 and after.
+        wc1_used = any(chip['name'] == 'wildcard' and chip['event'] < 21 for chip in history_data.get('chips', []))
+        wc2_used = any(chip['name'] == 'wildcard' and chip['event'] >= 21 for chip in history_data.get('chips', []))
+
+        return user['manager_name'], {
+            'WC1': wc1_used,
+            'WC2': wc2_used,
+            'FH': 'freehit' in used_chips,
+            'TC': '3xc' in used_chips,
+            'BB': 'bboost' in used_chips
+        }
+
+    tasks = [get_chip_usage(user) for user in linked_users]
+    results = await asyncio.gather(*tasks)
+
+    # Formatting
+    # Header
+    table = f"{'Manager':<15} | WC1 | WC2 | FH  | TC  | BB \n"
+    table += "-" * 43 + "\n"
+
+    # Rows
+    for manager_name, usage in sorted(results, key=lambda x: x[0]):
+        wc1_emoji = '✅' if usage.get('WC1') else '❌'
+        wc2_emoji = '✅' if usage.get('WC2') else '❌'
+        fh_emoji = '✅' if usage.get('FH') else '❌'
+        tc_emoji = '✅' if usage.get('TC') else '❌'
+        bb_emoji = '✅' if usage.get('BB') else '❌'
+        table += f"{manager_name:<15.14} | {wc1_emoji:^3} | {wc2_emoji:^3} | {fh_emoji:^3} | {tc_emoji:^3} | {bb_emoji:^3}\n"
+
+    await interaction.followup.send(f"```\n{table}```\n✅ = Used, ❌ = Available")
 
 
 if __name__ == "__main__":
