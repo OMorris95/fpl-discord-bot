@@ -686,6 +686,8 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
                 # Promote VC only if they are in the final scoring picks
                 if any(sp['element'] == p['element'] for sp in scoring_picks):
                     effective_multiplier = 2
+            
+            p['final_multiplier'] = effective_multiplier
         
             gw_points += player_points * effective_multiplier
 
@@ -862,31 +864,15 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         was_subbed_in = not is_starter and player_id in scoring_player_ids and is_finished
 
         # Determine points to display
-        final_multiplier = 0
-        if player_id in scoring_player_ids:
-            # Find the multiplier from the scoring_picks data, which has correct C/VC logic
-            scoring_pick_details = next((p for p in scoring_picks_data if p['element'] == player_id), None)
-            final_multiplier = scoring_pick_details.get('multiplier', 1) if scoring_pick_details else 1
-            
-            # Account for VC promotion
-            captain_pick = next((p for p in fpl_data['picks']['picks'] if p['is_captain']), None)
-            captain_played = True
-            if is_finished and captain_pick:
-                captain_minutes = live_points.get(captain_pick['element'], {}).get('minutes', 0)
-                if captain_minutes == 0:
-                    captain_played = False
-            
-            if player_pick['is_captain'] and not captain_played:
-                final_multiplier = 1 # Captain didn't play, gets 1x
-            if player_pick['is_vice_captain'] and not captain_played:
-                final_multiplier = 2 # VC gets promoted
+        display_points = base_points
+        scoring_pick_details = next((p for p in scoring_picks_data if p['element'] == player_id), None)
 
-        display_points = base_points * final_multiplier
+        if scoring_pick_details:
+            final_multiplier = scoring_pick_details.get('final_multiplier', 1)
+            display_points = base_points * final_multiplier
+        
         points_text = f"{display_points} pts"
         
-        # For non-scoring bench players, show their base points
-        if not is_starter and not was_subbed_in:
-            points_text = f"{base_points} pts"
         # For subbed out starters, show their base points but they won't be summed
         if was_subbed_out:
             points_text = f"({base_points}) pts"
@@ -937,7 +923,9 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
         if player_pick['is_captain']:
-            draw.text((paste_x + 80, paste_y - 5), "C", font=captain_font, fill="black", stroke_width=2, stroke_fill="yellow")
+            active_chip = fpl_data['picks'].get('active_chip')
+            captain_text = "TC" if active_chip == '3xc' else "C"
+            draw.text((paste_x + 80, paste_y - 5), captain_text, font=captain_font, fill="black", stroke_width=2, stroke_fill="yellow")
         elif player_pick['is_vice_captain']:
             draw.text((paste_x + 80, paste_y - 5), "V", font=captain_font, fill="black", stroke_width=2, stroke_fill="white")
 
