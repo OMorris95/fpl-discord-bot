@@ -568,7 +568,7 @@ async def get_league_managers(session, league_id):
     return {}
 
 # --- NEW REFACTORED HELPER FOR LIVE POINT CALCULATION ---
-async def get_live_manager_details(session, manager_entry, current_gw, live_points_map, is_finished=False):
+async def get_live_manager_details(session, manager_entry, current_gw, live_points_map, all_players_map, is_finished=False):
     """Fetches picks/history for a manager and calculates their score, handling auto-subs for finished GWs."""
     manager_id = manager_entry['entry']
     picks_task = fetch_fpl_api(
@@ -594,7 +594,7 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
     scoring_picks = []
 
     # The API's official points are the source of truth if available for a finished GW
-    if is_finished and picks_data['entry_history']['points'] > 0:
+    if is_finished and picks_data.get('automatic_subs'):
         final_gw_points = picks_data['entry_history']['points']
         
         # Determine scoring picks for the image based on auto-subs
@@ -620,21 +620,54 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
             if captain_minutes == 0:
                 captain_played = False
 
-        # Determine which players' points to count
-        if is_finished:
-            automatic_subs = picks_data.get('automatic_subs', [])
-            subs_in = {sub['element_in'] for sub in automatic_subs}
-            subs_out = {sub['element_out'] for sub in automatic_subs}
-            for p in picks_data['picks']:
-                is_starter = p['position'] <= 11
-                if (is_starter and p['element'] not in subs_out) or \
-                   (not is_starter and p['element'] in subs_in):
-                    scoring_picks.append(p)
-        else: # Live GW
-            if active_chip == 'bboost':
-                scoring_picks = picks_data['picks']
-            else:
-                scoring_picks = [p for p in picks_data['picks'] if p['position'] <= 11]
+        # --- MANUAL SUBSTITUTION LOGIC ---
+        if active_chip == 'bboost':
+            scoring_picks = picks_data['picks']
+        else:
+            starters = [p for p in picks_data['picks'] if p['position'] <= 11]
+            bench = sorted([p for p in picks_data['picks'] if p['position'] > 11], key=lambda x: x['position'])
+            
+            squad = list(starters) # This is the list of players we will modify
+
+            # 1. Substitute goalkeeper if needed
+            starting_gk = next((p for p in squad if all_players_map[p['element']]['element_type'] == 1), None)
+            if starting_gk and live_points_map.get(starting_gk['element'], {}).get('minutes', 0) == 0:
+                sub_gk = next((p for p in bench if all_players_map[p['element']]['element_type'] == 1), None)
+                if sub_gk and live_points_map.get(sub_gk['element'], {}).get('minutes', 0) > 0:
+                    squad = [sub_gk if p == starting_gk else p for p in squad]
+
+            # 2. Substitute outfield players
+            for sub_in_player in bench:
+                if all_players_map[sub_in_player['element']]['element_type'] == 1 or live_points_map.get(sub_in_player['element'], {}).get('minutes', 0) == 0:
+                    continue
+
+                player_subbed_out = None
+                
+                # Find a player to replace
+                for i, player_to_replace in enumerate(squad):
+                    is_outfield = all_players_map[player_to_replace['element']]['element_type'] != 1
+                    did_not_play = live_points_map.get(player_to_replace['element'], {}).get('minutes', 0) == 0
+                    
+                    if is_outfield and did_not_play:
+                        # Create a potential new squad with the sub
+                        potential_squad = list(squad)
+                        potential_squad[i] = sub_in_player
+                        
+                        # Validate formation
+                        counts = {1:0, 2:0, 3:0, 4:0}
+                        for p in potential_squad:
+                            player_type = all_players_map[p['element']]['element_type']
+                            counts[player_type] += 1
+                        
+                        if counts[1] == 1 and counts[2] >= 3 and counts[3] >= 2 and counts[4] >= 1:
+                            player_subbed_out = player_to_replace
+                            squad = potential_squad
+                            break # Sub successful, move to next bench player
+                
+                if player_subbed_out:
+                    break
+
+            scoring_picks = squad
         
         # Calculate points from the determined scoring players
         for p in scoring_picks:
@@ -650,12 +683,15 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
                 else: # Captain didn't play
                     effective_multiplier = 1
             elif p['is_vice_captain'] and not captain_played:
-                effective_multiplier = 2 # Promote VC
-
+                # Promote VC only if they are in the final scoring picks
+                if any(sp['element'] == p['element'] for sp in scoring_picks):
+                    effective_multiplier = 2
+        
             gw_points += player_points * effective_multiplier
 
         transfer_cost = picks_data['entry_history']['event_transfers_cost']
         final_gw_points = gw_points - transfer_cost
+
 
     # --- Calculate total points ---
     pre_gw_total = 0
@@ -1720,8 +1756,9 @@ async def team(interaction: discord.Interaction, manager: str = None):
         return
 
     live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
+    all_players_map = {p['id']: p for p in bootstrap_data.get('elements', [])}
     
-    tasks = [get_live_manager_details(session, mgr, current_gw, live_points_map, is_finished=is_finished) for mgr in league_data.get('standings', {}).get('results', [])]
+    tasks = [get_live_manager_details(session, mgr, current_gw, live_points_map, all_players_map, is_finished=is_finished) for mgr in league_data.get('standings', {}).get('results', [])]
     all_manager_data = await asyncio.gather(*tasks)
     
     manager_live_scores = [d for d in all_manager_data if d is not None]
@@ -1823,8 +1860,9 @@ async def table(interaction: discord.Interaction):
 
     # --- Process and Display ---
     live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
+    all_players_map = {p['id']: p for p in bootstrap_data['elements']}
     
-    tasks = [get_live_manager_details(session, manager, current_gw, live_points_map, is_finished=is_finished) for manager in league_data.get('standings', {}).get('results', [])]
+    tasks = [get_live_manager_details(session, manager, current_gw, live_points_map, all_players_map, is_finished=is_finished) for manager in league_data.get('standings', {}).get('results', [])]
     manager_details = [res for res in await asyncio.gather(*tasks) if res]
 
     manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
