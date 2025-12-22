@@ -609,8 +609,10 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
                 scoring_picks.append(p)
     else:
         # --- Manual calculation (for live GWs or when official points are not ready) ---
-        
-        # Check captain status first
+        gw_points = 0
+        active_chip = picks_data.get('active_chip')
+
+        # Determine captain status first
         captain_pick = next((p for p in picks_data['picks'] if p['is_captain']), None)
         captain_played = True
         if captain_pick:
@@ -618,7 +620,7 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
             if captain_minutes == 0:
                 captain_played = False
 
-        # Determine scoring players
+        # Determine which players' points to count
         if is_finished:
             automatic_subs = picks_data.get('automatic_subs', [])
             subs_in = {sub['element_in'] for sub in automatic_subs}
@@ -629,24 +631,28 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
                    (not is_starter and p['element'] in subs_in):
                     scoring_picks.append(p)
         else: # Live GW
-            active_chip = picks_data.get('active_chip')
             if active_chip == 'bboost':
                 scoring_picks = picks_data['picks']
             else:
                 scoring_picks = [p for p in picks_data['picks'] if p['position'] <= 11]
         
         # Calculate points from the determined scoring players
-        gw_points = 0
         for p in scoring_picks:
             player_points = live_points_map.get(p['element'], {}).get('total_points', 0)
             
-            multiplier = 1
+            # Start with a base multiplier of 1 for any player in the scoring list
+            effective_multiplier = 1
+            
+            # Apply captaincy rules
             if p['is_captain']:
-                multiplier = 2 if captain_played else 1
+                if captain_played:
+                    effective_multiplier = 3 if active_chip == '3xc' else 2
+                else: # Captain didn't play
+                    effective_multiplier = 1
             elif p['is_vice_captain'] and not captain_played:
-                multiplier = 2
+                effective_multiplier = 2 # Promote VC
 
-            gw_points += player_points * multiplier
+            gw_points += player_points * effective_multiplier
 
         transfer_cost = picks_data['entry_history']['event_transfers_cost']
         final_gw_points = gw_points - transfer_cost
