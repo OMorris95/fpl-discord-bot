@@ -568,7 +568,7 @@ async def get_league_managers(session, league_id):
     return {}
 
 # --- NEW REFACTORED HELPER FOR LIVE POINT CALCULATION ---
-async def get_live_manager_details(session, manager_entry, current_gw, live_points_map, all_players_map, is_finished=False):
+async def get_live_manager_details(session, manager_entry, current_gw, live_points_map, all_players_map, live_data, is_finished=False):
     """Fetches picks/history for a manager and calculates their score, handling auto-subs for finished GWs."""
     manager_id = manager_entry['entry']
     picks_task = fetch_fpl_api(
@@ -616,9 +616,24 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
         captain_pick = next((p for p in picks_data['picks'] if p['is_captain']), None)
         captain_played = True
         if captain_pick:
-            captain_minutes = live_points_map.get(captain_pick['element'], {}).get('minutes', 0)
-            if captain_minutes == 0:
+            captain_id = captain_pick['element']
+            captain_minutes = live_points_map.get(captain_id, {}).get('minutes', 0)
+
+            # Find the captain's team ID from bootstrap data
+            captain_player_details = all_players_map.get(captain_id)
+            captain_team_id = captain_player_details['team'] if captain_player_details else None
+            
+            # Find the captain's fixture from the live data
+            captain_fixture = None
+            if captain_team_id and 'fixtures' in live_data:
+                captain_fixture = next((f for f in live_data['fixtures'] if f['team_h'] == captain_team_id or f['team_a'] == captain_team_id), None)
+            
+            # Captain is considered not to have played if his minutes are 0 AND his game is over
+            if captain_minutes == 0 and captain_fixture and captain_fixture.get('finished', False):
                 captain_played = False
+            # If the captain's game hasn't finished, he's still considered 'playing' for captaincy purposes
+            elif captain_minutes == 0 and (not captain_fixture or not captain_fixture.get('finished', False)):
+                captain_played = True
 
         # --- MANUAL SUBSTITUTION LOGIC ---
         if active_chip == 'bboost':
@@ -680,12 +695,14 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
             if p['is_captain']:
                 if captain_played:
                     effective_multiplier = 3 if active_chip == '3xc' else 2
-                else: # Captain didn't play
+                else: # Captain didn't play and their game is over
                     effective_multiplier = 1
             elif p['is_vice_captain'] and not captain_played:
-                # Promote VC only if they are in the final scoring picks
-                if any(sp['element'] == p['element'] for sp in scoring_picks):
-                    effective_multiplier = 2
+                vice_captain_minutes = live_points_map.get(p['element'], {}).get('minutes', 0)
+                if vice_captain_minutes > 0:
+                    # Promote VC only if they are in the final scoring picks and have played
+                    if any(sp['element'] == p['element'] for sp in scoring_picks):
+                        effective_multiplier = 2
             
             p['final_multiplier'] = effective_multiplier
         
@@ -1746,7 +1763,7 @@ async def team(interaction: discord.Interaction, manager: str = None):
     live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
     all_players_map = {p['id']: p for p in bootstrap_data.get('elements', [])}
     
-    tasks = [get_live_manager_details(session, mgr, current_gw, live_points_map, all_players_map, is_finished=is_finished) for mgr in league_data.get('standings', {}).get('results', [])]
+    tasks = [get_live_manager_details(session, mgr, current_gw, live_points_map, all_players_map, live_data, is_finished=is_finished) for mgr in league_data.get('standings', {}).get('results', [])]
     all_manager_data = await asyncio.gather(*tasks)
     
     manager_live_scores = [d for d in all_manager_data if d is not None]
@@ -1850,7 +1867,7 @@ async def table(interaction: discord.Interaction):
     live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
     all_players_map = {p['id']: p for p in bootstrap_data['elements']}
     
-    tasks = [get_live_manager_details(session, manager, current_gw, live_points_map, all_players_map, is_finished=is_finished) for manager in league_data.get('standings', {}).get('results', [])]
+    tasks = [get_live_manager_details(session, manager, current_gw, live_points_map, all_players_map, live_data, is_finished=is_finished) for manager in league_data.get('standings', {}).get('results', [])]
     manager_details = [res for res in await asyncio.gather(*tasks) if res]
 
     manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
