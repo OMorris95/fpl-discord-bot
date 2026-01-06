@@ -306,7 +306,7 @@ def get_league_id_for_context(interaction: discord.Interaction):
     return get_configured_league_id(interaction.channel_id, getattr(interaction, "guild_id", None))
 
 # --- FILE PATHS ---
-BACKGROUND_IMAGE_PATH = "pitch-graphic-t77-OTdp.png"
+BACKGROUND_IMAGE_PATH = "mobile-pitch-graphic.png"
 FONT_PATH = "font.ttf"
 HEADSHOTS_DIR = "player_headshots"
 JERSEYS_DIR = "team_jerseys"
@@ -318,11 +318,7 @@ REQUEST_HEADERS = {
 }
 
 # --- LAYOUT & STYLING (from your original script) ---
-PITCH_X_START, PITCH_X_END = 200, 1216
-GK_Y, DEF_Y, MID_Y, FWD_Y = 65, 265, 465, 665
-BENCH_X, BENCH_Y_START, BENCH_Y_SPACING = 120, 65, 180
-SUMMARY_X, SUMMARY_Y_START, SUMMARY_LINE_SPACING = 1300, 40, 35
-NAME_FONT_SIZE, POINTS_FONT_SIZE, CAPTAIN_FONT_SIZE, SUMMARY_FONT_SIZE = 22, 20, 22, 24
+NAME_FONT_SIZE, POINTS_FONT_SIZE, CAPTAIN_FONT_SIZE, SUMMARY_FONT_SIZE = 20, 18, 22, 24
 POINTS_BOX_EXTRA_PADDING = 4
 
 
@@ -732,6 +728,7 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
     return {
         "id": manager_id,
         "name": manager_entry['player_name'],
+        "team_name": manager_entry['entry_name'],
         "live_total_points": live_total_points,
         "final_gw_points": final_gw_points,
         "players_played": players_played_count,
@@ -821,24 +818,35 @@ async def get_manager_transfer_activity(session, manager_entry_id, gameweek):
     }
 
 
-def calculate_player_coordinates(picks, all_players):
+def calculate_player_coordinates(picks, all_players, width, height):
     starters = [p for p in picks if p['position'] <= 11]
     bench = [p for p in picks if p['position'] > 11]
+    bench.sort(key=lambda x: x['position'])  # Ensure bench is ordered
+
     positions = {1: [], 2: [], 3: [], 4: []}
     for p in starters:
         player_type = all_players[p['element']]['element_type']
         positions[player_type].append(p)
+
     coords = {}
-    pitch_width = PITCH_X_END - PITCH_X_START
-    if positions[1]:
-        coords[positions[1][0]['element']] = ((PITCH_X_START + PITCH_X_END) // 2, GK_Y)
-    for pos_type, y_coord in [(2, DEF_Y), (3, MID_Y), (4, FWD_Y)]:
-        num_players = len(positions[pos_type])
-        for i, p in enumerate(positions[pos_type]):
-            x = PITCH_X_START + ((i + 1) * pitch_width) / (num_players + 1)
-            coords[p['element']] = (int(x), y_coord)
+    
+    # Vertical Layout Y-coordinates (approximate ratios for mobile pitch)
+    y_ratios = {1: 0.14, 2: 0.30, 3: 0.49, 4: 0.68}
+    
+    # Calculate coordinates for starters
+    for pos_type, y_ratio in y_ratios.items():
+        players = positions[pos_type]
+        if not players: continue
+        y = int(height * y_ratio)
+        for i, p in enumerate(players):
+            x = int(width * (i + 0.5) / len(players))
+            coords[p['element']] = (x, y)
+
+    # Calculate coordinates for bench (Horizontal row at bottom)
+    bench_y = int(height * 0.88)
     for i, p in enumerate(bench):
-        coords[p['element']] = (BENCH_X, BENCH_Y_START + (i * BENCH_Y_SPACING))
+        x = int(width * (i + 0.5) / len(bench))
+        coords[p['element']] = (x, bench_y)
     return coords
 
 POINTS_BOX_EXTRA_PADDING = 4
@@ -864,7 +872,8 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
     all_players = {p['id']: p for p in fpl_data['bootstrap']['elements']}
     all_teams = {t['id']: t for t in fpl_data['bootstrap']['teams']}
     live_points = {p['id']: p['stats'] for p in fpl_data['live']['elements']}
-    coordinates = calculate_player_coordinates(fpl_data['picks']['picks'], all_players)
+    width, height = background.size
+    coordinates = calculate_player_coordinates(fpl_data['picks']['picks'], all_players, width, height)
 
     # Determine the final set of scoring players from the provided data
     scoring_picks_data = fpl_data['picks'].get('scoring_picks', [])
@@ -946,27 +955,32 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         elif player_pick['is_vice_captain']:
             draw.text((paste_x + 80, paste_y - 5), "V", font=captain_font, fill="black", stroke_width=2, stroke_fill="white")
 
-    summary_strings = [f"League Rank: {summary_data['rank']}", f"GW Points: {summary_data['gw_points']}", f"Total Points: {summary_data['total_points']}"]
-    summary_text_width = 0
-    for text in summary_strings:
-        bbox = draw.textbbox((0, 0), text, font=summary_font)
-        summary_text_width = max(summary_text_width, bbox[2] - bbox[0])
-    summary_padding = 20
-    summary_padding_y = 5
-    summary_box = [
-        SUMMARY_X - summary_text_width - summary_padding,
-        SUMMARY_Y_START - summary_padding_y,
-        SUMMARY_X + 10,
-        SUMMARY_Y_START + len(summary_strings) * SUMMARY_LINE_SPACING + summary_padding_y
-    ]
-    draw.rounded_rectangle(summary_box, radius=16, fill="#6625ff")
+    # Draw Bench Background Area
+    bench_bg_y = int(height * 0.82)
+    draw.rectangle([0, bench_bg_y, width, height], fill=(0, 0, 0, 80))
+    draw.line([0, bench_bg_y, width, bench_bg_y], fill=(255, 255, 255, 100), width=2)
 
-    for i, text in enumerate(summary_strings):
-        y_pos = SUMMARY_Y_START + (i * SUMMARY_LINE_SPACING)
-        text_bbox = draw.textbbox((0, 0), text, font=summary_font)
-        text_width = text_bbox[2] - text_bbox[0]
-        x_pos = SUMMARY_X - text_width
-        draw.text((x_pos, y_pos), text, font=summary_font, fill="white", stroke_width=1, stroke_fill="black")
+    # Draw Header Info (Team Name, GW Points, Total Points)
+    header_y = 20
+    left_margin = 20
+    
+    # Team Name
+    team_name_text = summary_data.get('team_name', 'My Team')
+    team_font = ImageFont.truetype(FONT_PATH, 28)
+    draw.text((left_margin - 10, header_y - 6), team_name_text, font=team_font, fill="black")
+    
+    # Calculate offset for points info (beside team name)
+    team_bbox = draw.textbbox((0, 0), team_name_text, font=team_font)
+    team_width = team_bbox[2] - team_bbox[0]
+    points_x = left_margin + team_width + 30
+    
+    # GW Points
+    gw_text = f"GW{fpl_data['live'].get('gw', '')} PTS: {summary_data['gw_points']}"
+    draw.text((points_x, header_y - 14), gw_text, font=summary_font, fill="black")
+    
+    # Total Points (below GW points)
+    total_text = f"Total PTS: {summary_data['total_points']}"
+    draw.text((points_x, header_y + 12), total_text, font=summary_font, fill="black")
 
     img_byte_arr = io.BytesIO()
     background.convert("RGB").save(img_byte_arr, format='PNG')
@@ -995,7 +1009,8 @@ def generate_dreamteam_image(fpl_data, summary_data):
     all_players = {p['id']: p for p in fpl_data['bootstrap']['elements']}
     all_teams = {t['id']: t for t in fpl_data['bootstrap']['teams']}
     live_points = {p['id']: p['stats']['total_points'] for p in fpl_data['live']['elements']}
-    coordinates = calculate_player_coordinates(fpl_data['picks']['picks'], all_players)
+    width, height = background.size
+    coordinates = calculate_player_coordinates(fpl_data['picks']['picks'], all_players, width, height)
 
     # Draw players (same as original team image but without captain/vice captain)
     for player_pick in fpl_data['picks']['picks']:
@@ -1041,28 +1056,22 @@ def generate_dreamteam_image(fpl_data, summary_data):
         draw.text((x - name_bbox[2] / 2, name_box_y - 4), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
-    # Draw summary info (modified for dream team)
-    summary_strings = [f"Dream Team", f"Total: {summary_data['total_points']} pts", f"Gameweek {summary_data['gameweek']}"]
-    dream_text_width = 0
-    for text in summary_strings:
-        bbox = draw.textbbox((0, 0), text, font=summary_font)
-        dream_text_width = max(dream_text_width, bbox[2] - bbox[0])
-    dream_padding = 20
-    dream_padding_y = 5
-    dream_box = [
-        SUMMARY_X - dream_text_width - dream_padding,
-        SUMMARY_Y_START - dream_padding_y,
-        SUMMARY_X + 10,
-        SUMMARY_Y_START + len(summary_strings) * SUMMARY_LINE_SPACING + dream_padding_y
-    ]
-    draw.rounded_rectangle(dream_box, radius=16, fill="#6625ff")
-
-    for i, text in enumerate(summary_strings):
-        y_pos = SUMMARY_Y_START + (i * SUMMARY_LINE_SPACING)
-        text_bbox = draw.textbbox((0, 0), text, font=summary_font)
-        text_width = text_bbox[2] - text_bbox[0]
-        x_pos = SUMMARY_X - text_width
-        draw.text((x_pos, y_pos), text, font=summary_font, fill="white", stroke_width=1, stroke_fill="black")
+    # Draw Header Info for Dream Team
+    header_y = 20
+    left_margin = 20
+    
+    team_font = ImageFont.truetype(FONT_PATH, 32)
+    draw.text((left_margin, header_y), "Dream Team", font=team_font, fill="black")
+    
+    dream_bbox = draw.textbbox((0, 0), "Dream Team", font=team_font)
+    dream_width = dream_bbox[2] - dream_bbox[0]
+    points_x = left_margin + dream_width + 30
+    
+    gw_text = f"Gameweek {summary_data['gameweek']}"
+    draw.text((points_x, header_y + 4), gw_text, font=summary_font, fill="black")
+    
+    total_text = f"Total PTS: {summary_data['total_points']}"
+    draw.text((points_x, header_y + 30), total_text, font=summary_font, fill="black")
 
     # Draw Player of the Week section
     potw_data = summary_data['player_of_week']
@@ -1070,9 +1079,9 @@ def generate_dreamteam_image(fpl_data, summary_data):
     potw_name = potw_player_info['web_name']
     potw_points = potw_data['points']
     
-    # Player of the Week positioning (top left, same Y as goalkeeper)
-    potw_x = 140  # Left side of the image
-    potw_y = GK_Y - 20  # Same Y axis as goalkeeper, slightly above
+    # Player of the Week positioning (Top Left)
+    potw_x = 20
+    potw_y = 20
     
     # Try to load player headshot for POTW
     potw_headshot_path = os.path.join(HEADSHOTS_DIR, f"{potw_name.replace(' ', '_')}_{potw_data['id']}.png")
@@ -1784,7 +1793,8 @@ async def team(interaction: discord.Interaction, manager: str = None):
     summary_data = {
         "rank": live_rank,
         "gw_points": selected_manager_details['final_gw_points'],
-        "total_points": selected_manager_details['live_total_points']
+        "total_points": selected_manager_details['live_total_points'],
+        "team_name": selected_manager_details['team_name']
     }
 
     fpl_data_for_image = {
@@ -2743,4 +2753,3 @@ if __name__ == "__main__":
         print("!!! ERROR: DISCORD_BOT_TOKEN not found in .env file. Please create a .env file with your bot token.")
     else:
         bot.run(DISCORD_BOT_TOKEN)
-
