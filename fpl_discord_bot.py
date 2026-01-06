@@ -934,6 +934,8 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         background.paste(asset_img, (paste_x, paste_y), asset_img)
 
         name_text = player_name
+        if len(name_text) > 10:
+            name_text = name_text[:8] + "..."
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
         box_width = max(name_bbox[2], points_bbox[2]) + 10
@@ -945,7 +947,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         points_box_y = name_box_y + name_box_height
         draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
         draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill="#015030")
-        draw.text((x - name_bbox[2] / 2, name_box_y - 4), name_text, font=name_font, fill="white")
+        draw.text((x - name_bbox[2] / 2, name_box_y - 2), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
         if player_pick['is_captain']:
@@ -954,11 +956,6 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
             draw.text((paste_x + 80, paste_y - 5), captain_text, font=captain_font, fill="black", stroke_width=2, stroke_fill="yellow")
         elif player_pick['is_vice_captain']:
             draw.text((paste_x + 80, paste_y - 5), "V", font=captain_font, fill="black", stroke_width=2, stroke_fill="white")
-
-    # Draw Bench Background Area
-    bench_bg_y = int(height * 0.82)
-    draw.rectangle([0, bench_bg_y, width, height], fill=(0, 0, 0, 80))
-    draw.line([0, bench_bg_y, width, bench_bg_y], fill=(255, 255, 255, 100), width=2)
 
     # Draw Header Info (Team Name, GW Points, Total Points)
     header_y = 20
@@ -1041,7 +1038,10 @@ def generate_dreamteam_image(fpl_data, summary_data):
         paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
         background.paste(asset_img, (paste_x, paste_y), asset_img)
 
-        name_text, points_text = player_name, f"{display_points} pts"
+        name_text = player_name
+        if len(name_text) > 10:
+            name_text = name_text[:8] + "..."
+        points_text = f"{display_points} pts"
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
         box_width = max(name_bbox[2], points_bbox[2]) + 10
