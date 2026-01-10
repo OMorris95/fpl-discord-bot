@@ -47,11 +47,11 @@ def get_jersey_filename(team_name: str, is_goalkeeper: bool = False) -> str:
     # Replace spaces with hyphens
     base_name = mapped_name.replace(" ", "-")
 
-    # Future: support goalkeeper jerseys
-    # if is_goalkeeper:
-    #     gk_path = f"{base_name}_gk.png"
-    #     if os.path.exists(os.path.join(JERSEYS_DIR, gk_path)):
-    #         return gk_path
+    # Support goalkeeper jerseys (fall back to outfield if not found)
+    if is_goalkeeper:
+        gk_path = f"{base_name}-GK.png"
+        if os.path.exists(os.path.join(JERSEYS_DIR, gk_path)):
+            return gk_path
 
     return f"{base_name}.png"
 
@@ -153,7 +153,11 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
 
         try:
             asset_img = Image.open(jersey_path).convert("RGBA")
-            asset_img = asset_img.resize(JERSEY_SIZE, Image.LANCZOS)
+            # Resize to target height, maintain aspect ratio (GK jerseys are wider)
+            target_height = JERSEY_SIZE[1]
+            scale = target_height / asset_img.height
+            new_width = int(asset_img.width * scale)
+            asset_img = asset_img.resize((new_width, target_height), Image.LANCZOS)
         except FileNotFoundError:
             print(f"Jersey not found: {jersey_path}")
             continue
@@ -201,7 +205,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
     # Team Name
     team_name_text = summary_data.get('team_name', 'My Team')
     team_font = ImageFont.truetype(FONT_PATH, 28)
-    draw.text((left_margin - 10, header_y - 6), team_name_text, font=team_font, fill="black")
+    draw.text((left_margin - 10, header_y - 6), team_name_text, font=team_font, fill="white")
 
     # Calculate offset for points info (beside team name)
     team_bbox = draw.textbbox((0, 0), team_name_text, font=team_font)
@@ -210,11 +214,11 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
 
     # GW Points
     gw_text = f"GW{fpl_data['live'].get('gw', '')} PTS: {summary_data['gw_points']}"
-    draw.text((points_x, header_y - 14), gw_text, font=summary_font, fill="black")
+    draw.text((points_x, header_y - 14), gw_text, font=summary_font, fill="white")
 
     # Total Points (below GW points)
     total_text = f"Total PTS: {summary_data['total_points']}"
-    draw.text((points_x, header_y + 12), total_text, font=summary_font, fill="black")
+    draw.text((points_x, header_y + 12), total_text, font=summary_font, fill="white")
 
     img_byte_arr = io.BytesIO()
     background.convert("RGB").save(img_byte_arr, format='PNG')
@@ -266,7 +270,11 @@ def generate_dreamteam_image(fpl_data, summary_data):
 
         try:
             asset_img = Image.open(jersey_path).convert("RGBA")
-            asset_img = asset_img.resize(JERSEY_SIZE, Image.LANCZOS)
+            # Resize to target height, maintain aspect ratio (GK jerseys are wider)
+            target_height = JERSEY_SIZE[1]
+            scale = target_height / asset_img.height
+            new_width = int(asset_img.width * scale)
+            asset_img = asset_img.resize((new_width, target_height), Image.LANCZOS)
         except FileNotFoundError:
             print(f"Jersey not found: {jersey_path}")
             continue
