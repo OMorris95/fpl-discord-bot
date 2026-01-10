@@ -43,11 +43,12 @@ from .image_generator import (
     format_player_price,
     build_manager_url,
     format_manager_link,
+    get_jersey_filename,
     calculate_player_coordinates,
     generate_team_image,
     generate_dreamteam_image,
     BACKGROUND_IMAGE_PATH,
     FONT_PATH,
-    HEADSHOTS_DIR,
     JERSEYS_DIR,
+    JERSEY_SIZE,
 )

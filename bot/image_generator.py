@@ -7,8 +7,8 @@ from PIL import Image, ImageDraw, ImageFont
 # --- File Paths ---
 BACKGROUND_IMAGE_PATH = "mobile-pitch-graphic.png"
 FONT_PATH = "font.ttf"
-HEADSHOTS_DIR = "player_headshots"
-JERSEYS_DIR = "team_jerseys"
+JERSEYS_DIR = "team_jerseys_test"
+JERSEY_SIZE = (94, 131)  # ~10% smaller than original 104x146, maintains aspect ratio
 
 # --- Layout & Styling ---
 NAME_FONT_SIZE = 20
@@ -36,6 +36,26 @@ def format_manager_link(label, entry_id, gameweek=None):
     return f"[{label}]({url})"
 
 
+def get_jersey_filename(team_name: str, is_goalkeeper: bool = False) -> str:
+    """Convert FPL API team name to jersey filename."""
+    # Handle special cases where API name differs from file name
+    name_mapping = {
+        "Spurs": "Tottenham",
+        "Nott'm Forest": "Nott-Forest",
+    }
+    mapped_name = name_mapping.get(team_name, team_name)
+    # Replace spaces with hyphens
+    base_name = mapped_name.replace(" ", "-")
+
+    # Future: support goalkeeper jerseys
+    # if is_goalkeeper:
+    #     gk_path = f"{base_name}_gk.png"
+    #     if os.path.exists(os.path.join(JERSEYS_DIR, gk_path)):
+    #         return gk_path
+
+    return f"{base_name}.png"
+
+
 def calculate_player_coordinates(picks, all_players, width, height):
     """Calculate x,y coordinates for each player based on their position."""
     starters = [p for p in picks if p['position'] <= 11]
@@ -50,7 +70,7 @@ def calculate_player_coordinates(picks, all_players, width, height):
     coords = {}
 
     # Vertical Layout Y-coordinates (approximate ratios for mobile pitch)
-    y_ratios = {1: 0.14, 2: 0.30, 3: 0.49, 4: 0.68}
+    y_ratios = {1: 0.13, 2: 0.31, 3: 0.50, 4: 0.69}
 
     # Calculate coordinates for starters
     for pos_type, y_ratio in y_ratios.items():
@@ -63,7 +83,7 @@ def calculate_player_coordinates(picks, all_players, width, height):
             coords[p['element']] = (x, y)
 
     # Calculate coordinates for bench (Horizontal row at bottom)
-    bench_y = int(height * 0.88)
+    bench_y = int(height * 0.89)
     for i, p in enumerate(bench):
         x = int(width * (i + 0.5) / len(bench))
         coords[p['element']] = (x, bench_y)
@@ -124,22 +144,19 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
             points_text = f"({base_points}) pts"
 
         # --- Drawing logic ---
-        asset_img = None
-        asset_size = (88, 112)
-        headshot_path = os.path.join(HEADSHOTS_DIR, f"{player_name.replace(' ', '_')}_{player_id}.png")
+        # Get team jersey
+        team_id = player_info['team']
+        team_name = all_teams[team_id]['name']
+        is_goalkeeper = player_info['element_type'] == 1
+        jersey_filename = get_jersey_filename(team_name, is_goalkeeper)
+        jersey_path = os.path.join(JERSEYS_DIR, jersey_filename)
+
         try:
-            asset_img = Image.open(headshot_path).convert("RGBA")
+            asset_img = Image.open(jersey_path).convert("RGBA")
+            asset_img = asset_img.resize(JERSEY_SIZE, Image.LANCZOS)
         except FileNotFoundError:
-            team_id = player_info['team']
-            team_name = all_teams[team_id]['name'].replace(' ', '_')
-            kit = 'goalkeeper' if player_info['element_type'] == 1 else 'home'
-            jersey_path = os.path.join(JERSEYS_DIR, f"{team_name}_{kit}.webp")
-            asset_size = (110, 110)
-            try:
-                asset_img = Image.open(jersey_path).convert("RGBA")
-            except FileNotFoundError:
-                continue
-        asset_img = asset_img.resize(asset_size, Image.LANCZOS)
+            print(f"Jersey not found: {jersey_path}")
+            continue
         x, y = coordinates[player_id]
         paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
 
@@ -161,7 +178,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         box_width = max(name_bbox[2], points_bbox[2]) + 10
         name_box_height = fixed_name_box_height
         name_box_x = x - box_width // 2
-        name_box_y = y + 55
+        name_box_y = y + 66  # Adjusted for 131px tall jerseys
         points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
@@ -239,22 +256,20 @@ def generate_dreamteam_image(fpl_data, summary_data):
         multiplier = player_pick.get('multiplier', 1)
         is_bench_player = player_pick['position'] > 11 and multiplier == 0
         display_points = base_points if is_bench_player else base_points * multiplier
-        asset_img = None
-        asset_size = (88, 112)
-        headshot_path = os.path.join(HEADSHOTS_DIR, f"{player_name.replace(' ', '_')}_{player_id}.png")
+
+        # Get team jersey
+        team_id = player_info['team']
+        team_name = all_teams[team_id]['name']
+        is_goalkeeper = player_info['element_type'] == 1
+        jersey_filename = get_jersey_filename(team_name, is_goalkeeper)
+        jersey_path = os.path.join(JERSEYS_DIR, jersey_filename)
+
         try:
-            asset_img = Image.open(headshot_path).convert("RGBA")
+            asset_img = Image.open(jersey_path).convert("RGBA")
+            asset_img = asset_img.resize(JERSEY_SIZE, Image.LANCZOS)
         except FileNotFoundError:
-            team_id = player_info['team']
-            team_name = all_teams[team_id]['name'].replace(' ', '_')
-            kit = 'goalkeeper' if player_info['element_type'] == 1 else 'home'
-            jersey_path = os.path.join(JERSEYS_DIR, f"{team_name}_{kit}.webp")
-            asset_size = (110, 110)
-            try:
-                asset_img = Image.open(jersey_path).convert("RGBA")
-            except FileNotFoundError:
-                continue
-        asset_img = asset_img.resize(asset_size, Image.LANCZOS)
+            print(f"Jersey not found: {jersey_path}")
+            continue
         x, y = coordinates[player_id]
         paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
         background.paste(asset_img, (paste_x, paste_y), asset_img)
@@ -268,7 +283,7 @@ def generate_dreamteam_image(fpl_data, summary_data):
         box_width = max(name_bbox[2], points_bbox[2]) + 10
         name_box_height = fixed_name_box_height
         name_box_x = x - box_width // 2
-        name_box_y = y + 55
+        name_box_y = y + 66  # Adjusted for 131px tall jerseys
         points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
@@ -304,23 +319,20 @@ def generate_dreamteam_image(fpl_data, summary_data):
     potw_x = 20
     potw_y = 20
 
-    # Try to load player headshot for POTW
-    potw_headshot_path = os.path.join(HEADSHOTS_DIR, f"{potw_name.replace(' ', '_')}_{potw_data['id']}.png")
+    # Load jersey for POTW
+    team_id = potw_player_info['team']
+    team_name = all_teams[team_id]['name']
+    is_goalkeeper = potw_player_info['element_type'] == 1
+    jersey_filename = get_jersey_filename(team_name, is_goalkeeper)
+    jersey_path = os.path.join(JERSEYS_DIR, jersey_filename)
+
     potw_img = None
     try:
-        potw_img = Image.open(potw_headshot_path).convert("RGBA")
-        potw_img = potw_img.resize((60, 76), Image.LANCZOS)
+        potw_img = Image.open(jersey_path).convert("RGBA")
+        # Scale down for POTW box (maintain aspect ratio: 104x146 -> 52x73)
+        potw_img = potw_img.resize((52, 73), Image.LANCZOS)
     except FileNotFoundError:
-        # Fallback to jersey if headshot not found
-        team_id = potw_player_info['team']
-        team_name = all_teams[team_id]['name'].replace(' ', '_')
-        kit = 'goalkeeper' if potw_player_info['element_type'] == 1 else 'home'
-        jersey_path = os.path.join(JERSEYS_DIR, f"{team_name}_{kit}.webp")
-        try:
-            potw_img = Image.open(jersey_path).convert("RGBA")
-            potw_img = potw_img.resize((60, 60), Image.LANCZOS)
-        except FileNotFoundError:
-            pass
+        pass
 
     # Draw POTW background box
     potw_box_width = 220  # Made wider to fit "Player of the Week" text
