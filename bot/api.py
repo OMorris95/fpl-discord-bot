@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from pathlib import Path
 import aiohttp
 
@@ -12,6 +13,17 @@ REQUEST_HEADERS = {
 }
 CACHE_DIR = Path("cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Cache TTLs in seconds (None = never expires)
+CACHE_TTLS = {
+    'bootstrap': 6 * 60 * 60,         # 6 hours
+    'fixtures': 6 * 60 * 60,          # 6 hours
+    'live_event': 60,                 # 60 seconds during live matches
+    'league_standings': 5 * 60,       # 5 minutes
+    'league_picks': 5 * 60,           # 5 minutes during live GWs
+    'league_history': 5 * 60,         # 5 minutes during live GWs
+    'finished_gw': None,              # Never expires for completed GWs
+}
 
 # Module-level semaphore reference (set by the bot during initialization)
 _api_semaphore = None
@@ -46,6 +58,25 @@ def _save_cached_json_sync(path: Path, payload: dict):
 
 async def save_cached_json(path: Path, payload: dict):
     await asyncio.to_thread(_save_cached_json_sync, path, payload)
+
+
+async def is_cache_fresh(meta_path: Path, cache_type: str) -> bool:
+    """Check if cache is still valid based on TTL."""
+    meta = await load_cached_json(meta_path)
+    if not meta:
+        return False
+    ttl = CACHE_TTLS.get(cache_type)
+    if ttl is None:  # Never expires
+        return True
+    age = time.time() - meta.get('timestamp', 0)
+    return age < ttl
+
+
+async def save_cache_with_meta(cache_path: Path, data: dict, gameweek: int = None):
+    """Save cache data and a separate meta file with timestamp."""
+    await save_cached_json(cache_path, data)
+    meta_path = cache_path.with_suffix('.meta.json')
+    await save_cached_json(meta_path, {'timestamp': time.time(), 'gw': gameweek})
 
 
 # --- API Functions ---
@@ -113,23 +144,35 @@ async def get_league_managers(session, league_id):
     return {}
 
 
-async def get_live_manager_details(session, manager_entry, current_gw, live_points_map, all_players_map, live_data, is_finished=False):
-    """Fetches picks/history for a manager and calculates their score, handling auto-subs for finished GWs."""
+async def get_live_manager_details(session, manager_entry, current_gw, live_points_map, all_players_map, live_data,
+                                    is_finished=False, cached_picks=None, cached_history=None):
+    """Fetches picks/history for a manager and calculates their score, handling auto-subs for finished GWs.
+
+    Args:
+        cached_picks: Optional pre-fetched picks data (from get_league_picks_cached)
+        cached_history: Optional pre-fetched history data (from get_league_history_cached)
+    """
     manager_id = manager_entry['entry']
-    picks_task = fetch_fpl_api(
-        session,
-        f"{BASE_API_URL}entry/{manager_id}/event/{current_gw}/picks/",
-        cache_key=f"picks_entry_{manager_id}",
-        cache_gw=current_gw,
-        force_refresh=is_finished  # Refresh if the gameweek is over to get final subs/points
-    )
-    history_task = fetch_fpl_api(
-        session,
-        f"{BASE_API_URL}entry/{manager_id}/history/",
-        cache_key=f"history_entry_{manager_id}",
-        cache_gw=current_gw
-    )
-    picks_data, history_data = await asyncio.gather(picks_task, history_task)
+
+    # Use cached data if provided, otherwise fetch
+    if cached_picks is not None and cached_history is not None:
+        picks_data = cached_picks.get(manager_id)
+        history_data = cached_history.get(manager_id)
+    else:
+        picks_task = fetch_fpl_api(
+            session,
+            f"{BASE_API_URL}entry/{manager_id}/event/{current_gw}/picks/",
+            cache_key=f"picks_entry_{manager_id}",
+            cache_gw=current_gw,
+            force_refresh=is_finished  # Refresh if the gameweek is over to get final subs/points
+        )
+        history_task = fetch_fpl_api(
+            session,
+            f"{BASE_API_URL}entry/{manager_id}/history/",
+            cache_key=f"history_entry_{manager_id}",
+            cache_gw=current_gw
+        )
+        picks_data, history_data = await asyncio.gather(picks_task, history_task)
 
     if not picks_data or not history_data:
         return None
@@ -333,3 +376,148 @@ async def get_manager_transfer_activity(session, manager_entry_id, gameweek):
         "chip": chip,
         "transfer_cost": transfer_cost
     }
+
+
+# --- Aggregated League Caching Functions ---
+
+async def get_league_picks_cached(session, league_id: int, gameweek: int,
+                                   league_standings: dict = None,
+                                   is_finished: bool = False,
+                                   force_refresh: bool = False):
+    """
+    Fetches and caches ALL manager picks for a league in a single cache file.
+
+    Returns: dict mapping manager_id (int) -> picks_data (dict)
+
+    Args:
+        session: aiohttp session
+        league_id: FPL league ID
+        gameweek: Current gameweek number
+        league_standings: Pre-fetched standings data (optional, saves an API call)
+        is_finished: Whether the gameweek is finished (uses permanent cache)
+        force_refresh: Force refresh even if cache is valid
+    """
+    cache_path = CACHE_DIR / f"league_{league_id}_picks_gw{gameweek}.json"
+    meta_path = cache_path.with_suffix('.meta.json')
+
+    # Determine cache type based on GW status
+    cache_type = 'finished_gw' if is_finished else 'league_picks'
+
+    # Check if cache is valid
+    if not force_refresh and await is_cache_fresh(meta_path, cache_type):
+        cached = await load_cached_json(cache_path)
+        if cached:
+            # Convert string keys back to int (JSON doesn't support int keys)
+            return {int(k): v for k, v in cached.items()}
+
+    # Need to fetch - get standings if not provided
+    if not league_standings:
+        league_standings = await fetch_fpl_api(
+            session,
+            f"{BASE_API_URL}leagues-classic/{league_id}/standings/"
+        )
+
+    if not league_standings:
+        return {}
+
+    managers = league_standings.get('standings', {}).get('results', [])
+
+    # Fetch all picks in parallel (rate limited by semaphore)
+    async def fetch_manager_picks(manager):
+        manager_id = manager['entry']
+        picks = await fetch_fpl_api(
+            session,
+            f"{BASE_API_URL}entry/{manager_id}/event/{gameweek}/picks/"
+        )
+        return manager_id, picks
+
+    results = await asyncio.gather(*[fetch_manager_picks(m) for m in managers])
+
+    all_picks = {manager_id: picks for manager_id, picks in results if picks}
+
+    # Save to cache with timestamp
+    await save_cache_with_meta(cache_path, all_picks, gameweek)
+
+    return all_picks
+
+
+async def get_league_history_cached(session, league_id: int, gameweek: int,
+                                     league_standings: dict = None,
+                                     is_finished: bool = False,
+                                     force_refresh: bool = False):
+    """
+    Fetches and caches ALL manager history for a league in a single cache file.
+
+    Returns: dict mapping manager_id (int) -> history_data (dict)
+
+    Args:
+        session: aiohttp session
+        league_id: FPL league ID
+        gameweek: Current gameweek number
+        league_standings: Pre-fetched standings data (optional, saves an API call)
+        is_finished: Whether the gameweek is finished (uses permanent cache)
+        force_refresh: Force refresh even if cache is valid
+    """
+    cache_path = CACHE_DIR / f"league_{league_id}_history_gw{gameweek}.json"
+    meta_path = cache_path.with_suffix('.meta.json')
+
+    # Determine cache type based on GW status
+    cache_type = 'finished_gw' if is_finished else 'league_history'
+
+    # Check if cache is valid
+    if not force_refresh and await is_cache_fresh(meta_path, cache_type):
+        cached = await load_cached_json(cache_path)
+        if cached:
+            return {int(k): v for k, v in cached.items()}
+
+    # Need to fetch - get standings if not provided
+    if not league_standings:
+        league_standings = await fetch_fpl_api(
+            session,
+            f"{BASE_API_URL}leagues-classic/{league_id}/standings/"
+        )
+
+    if not league_standings:
+        return {}
+
+    managers = league_standings.get('standings', {}).get('results', [])
+
+    # Fetch all history in parallel
+    async def fetch_manager_history(manager):
+        manager_id = manager['entry']
+        history = await fetch_fpl_api(
+            session,
+            f"{BASE_API_URL}entry/{manager_id}/history/"
+        )
+        return manager_id, history
+
+    results = await asyncio.gather(*[fetch_manager_history(m) for m in managers])
+
+    all_history = {manager_id: history for manager_id, history in results if history}
+
+    # Save to cache with timestamp
+    await save_cache_with_meta(cache_path, all_history, gameweek)
+
+    return all_history
+
+
+async def cleanup_old_caches(current_gw: int, keep_last_n: int = 2):
+    """
+    Remove cache files from gameweeks more than keep_last_n behind current.
+    Call this when gameweek changes.
+    """
+    import re
+
+    min_gw_to_keep = max(1, current_gw - keep_last_n)
+
+    for cache_file in CACHE_DIR.glob("*_gw*.json"):
+        # Extract gameweek number from filename
+        match = re.search(r'_gw(\d+)', cache_file.name)
+        if match:
+            file_gw = int(match.group(1))
+            if file_gw < min_gw_to_keep:
+                try:
+                    cache_file.unlink()
+                    print(f"Cleaned up old cache: {cache_file.name}")
+                except OSError:
+                    pass

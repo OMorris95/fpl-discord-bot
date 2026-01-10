@@ -20,6 +20,7 @@ from bot.database import (
 from bot.api import (
     fetch_fpl_api, get_current_gameweek, get_last_completed_gameweek,
     get_league_managers, get_live_manager_details, get_manager_transfer_activity,
+    get_league_picks_cached, get_league_history_cached, cleanup_old_caches,
     set_api_semaphore, BASE_API_URL, CACHE_DIR,
 )
 from bot.image_generator import (
@@ -700,10 +701,22 @@ async def team(interaction: discord.Interaction, manager: str = None):
         await interaction.followup.send("Failed to fetch FPL league data.")
         return
 
+    # --- Fetch cached picks and history for all managers ---
+    cached_picks, cached_history = await asyncio.gather(
+        get_league_picks_cached(session, int(league_id), current_gw, league_standings=league_data, is_finished=is_finished),
+        get_league_history_cached(session, int(league_id), current_gw, league_standings=league_data, is_finished=is_finished)
+    )
+
     live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
     all_players_map = {p['id']: p for p in bootstrap_data.get('elements', [])}
-    
-    tasks = [get_live_manager_details(session, mgr, current_gw, live_points_map, all_players_map, live_data, is_finished=is_finished) for mgr in league_data.get('standings', {}).get('results', [])]
+
+    tasks = [
+        get_live_manager_details(
+            session, mgr, current_gw, live_points_map, all_players_map, live_data,
+            is_finished=is_finished, cached_picks=cached_picks, cached_history=cached_history
+        )
+        for mgr in league_data.get('standings', {}).get('results', [])
+    ]
     all_manager_data = await asyncio.gather(*tasks)
     
     manager_live_scores = [d for d in all_manager_data if d is not None]
@@ -798,17 +811,29 @@ async def table(interaction: discord.Interaction):
         f"{BASE_API_URL}leagues-classic/{league_id}/standings/",
         cache_key=f"league_{league_id}_standings",
         cache_gw=current_gw,
-        force_refresh=not is_finished # Only force refresh standings for live gameweeks
+        force_refresh=not is_finished  # Only force refresh standings for live gameweeks
     )
     if not league_data:
         await interaction.followup.send("Failed to fetch FPL league data.")
         return
 
+    # --- Fetch cached picks and history for all managers ---
+    cached_picks, cached_history = await asyncio.gather(
+        get_league_picks_cached(session, int(league_id), current_gw, league_standings=league_data, is_finished=is_finished),
+        get_league_history_cached(session, int(league_id), current_gw, league_standings=league_data, is_finished=is_finished)
+    )
+
     # --- Process and Display ---
     live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
     all_players_map = {p['id']: p for p in bootstrap_data['elements']}
-    
-    tasks = [get_live_manager_details(session, manager, current_gw, live_points_map, all_players_map, live_data, is_finished=is_finished) for manager in league_data.get('standings', {}).get('results', [])]
+
+    tasks = [
+        get_live_manager_details(
+            session, manager, current_gw, live_points_map, all_players_map, live_data,
+            is_finished=is_finished, cached_picks=cached_picks, cached_history=cached_history
+        )
+        for manager in league_data.get('standings', {}).get('results', [])
+    ]
     manager_details = [res for res in await asyncio.gather(*tasks) if res]
 
     manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
@@ -878,11 +903,11 @@ async def player(interaction: discord.Interaction, player: str):
         await interaction.followup.send("Could not determine the current gameweek.")
         return
 
+    # Fetch bootstrap and league data
     bootstrap_data = await fetch_fpl_api(
         session,
         f"{BASE_API_URL}bootstrap-static/",
-        cache_key="bootstrap",
-        cache_gw=current_gw
+        cache_key="bootstrap"
     )
     league_data = await fetch_fpl_api(
         session,
@@ -897,30 +922,27 @@ async def player(interaction: discord.Interaction, player: str):
 
     all_players = {p['id']: p for p in bootstrap_data['elements']}
     selected_player = all_players.get(player_id)
-    
+
     if not selected_player:
         await interaction.followup.send("Player not found.")
         return
 
     player_name = f"{selected_player['first_name']} {selected_player['second_name']}"
-    
-    tasks = []
-    for manager in league_data['standings']['results']:
-        manager_id = manager['entry']
-        tasks.append(fetch_fpl_api(
-            session,
-            f"{BASE_API_URL}entry/{manager_id}/event/{current_gw}/picks/",
-            cache_key=f"picks_entry_{manager_id}",
-            cache_gw=current_gw
-        ))
-    
-    all_picks_data = await asyncio.gather(*tasks)
-    
+
+    # Use cached league picks instead of fetching individually
+    all_picks = await get_league_picks_cached(
+        session, int(league_id), current_gw,
+        league_standings=league_data
+    )
+
     owners = []
     benched = []
-    for i, picks_data in enumerate(all_picks_data):
+    managers = league_data['standings']['results']
+    for manager in managers:
+        manager_id = manager['entry']
+        picks_data = all_picks.get(manager_id)
         if picks_data and 'picks' in picks_data:
-            manager_name = league_data['standings']['results'][i]['player_name']
+            manager_name = manager['player_name']
             for pick in picks_data['picks']:
                 if pick['element'] == player_id:
                     if pick['position'] > 11:
@@ -1057,8 +1079,7 @@ async def dreamteam(interaction: discord.Interaction):
     bootstrap_data = await fetch_fpl_api(
         session,
         f"{BASE_API_URL}bootstrap-static/",
-        cache_key="bootstrap",
-        cache_gw=last_completed_gw
+        cache_key="bootstrap"
     )
     league_data = await fetch_fpl_api(
         session,
@@ -1070,8 +1091,7 @@ async def dreamteam(interaction: discord.Interaction):
         session,
         f"{BASE_API_URL}event/{last_completed_gw}/live/",
         cache_key=f"event_live_gw{last_completed_gw}",
-        cache_gw=last_completed_gw,
-        force_refresh=True
+        cache_gw=last_completed_gw
     )
 
     if not all([bootstrap_data, league_data, completed_gw_data]):
@@ -1080,22 +1100,17 @@ async def dreamteam(interaction: discord.Interaction):
 
     all_players = {p['id']: p for p in bootstrap_data['elements']}
     completed_gw_stats = {p['id']: p['stats'] for p in completed_gw_data['elements']}
-    
+
+    # Use cached league picks (is_finished=True for permanent cache)
+    all_picks = await get_league_picks_cached(
+        session, int(league_id), last_completed_gw,
+        league_standings=league_data,
+        is_finished=True
+    )
+
     # Get all unique players from all managers' squads for the completed gameweek
     all_squad_players = {}
-    tasks = []
-    for manager in league_data['standings']['results']:
-        manager_id = manager['entry']
-        tasks.append(fetch_fpl_api(
-            session,
-            f"{BASE_API_URL}entry/{manager_id}/event/{last_completed_gw}/picks/",
-            cache_key=f"picks_entry_{manager_id}",
-            cache_gw=last_completed_gw
-        ))
-    
-    all_picks_data = await asyncio.gather(*tasks)
-    
-    for picks_data in all_picks_data:
+    for manager_id, picks_data in all_picks.items():
         if picks_data and 'picks' in picks_data:
             for pick in picks_data['picks']:
                 player_id = pick['element']
@@ -1172,8 +1187,7 @@ async def transfers(interaction: discord.Interaction):
     bootstrap_data = await fetch_fpl_api(
         session,
         f"{BASE_API_URL}bootstrap-static/",
-        cache_key="bootstrap",
-        cache_gw=current_gw
+        cache_key="bootstrap"
     )
     league_data = await fetch_fpl_api(
         session,
@@ -1280,8 +1294,7 @@ async def captains(interaction: discord.Interaction):
     bootstrap_data = await fetch_fpl_api(
         session,
         f"{BASE_API_URL}bootstrap-static/",
-        cache_key="bootstrap",
-        cache_gw=current_gw
+        cache_key="bootstrap"
     )
     league_data = await fetch_fpl_api(
         session,
@@ -1295,28 +1308,22 @@ async def captains(interaction: discord.Interaction):
         return
 
     all_players = {p['id']: p for p in bootstrap_data['elements']}
-    
-    tasks = []
+
+    # Use cached league picks
+    all_picks = await get_league_picks_cached(
+        session, int(league_id), current_gw,
+        league_standings=league_data
+    )
+
+    captain_info = []
     for manager in league_data['standings']['results']:
         manager_id = manager['entry']
-        tasks.append(fetch_fpl_api(
-            session,
-            f"{BASE_API_URL}entry/{manager_id}/event/{current_gw}/picks/",
-            cache_key=f"picks_entry_{manager_id}",
-            cache_gw=current_gw
-        ))
-    
-    all_picks_data = await asyncio.gather(*tasks)
-    
-    captain_info = []
-    for i, picks_data in enumerate(all_picks_data):
+        manager_name = manager['player_name']
+        picks_data = all_picks.get(manager_id)
+
         if picks_data and 'picks' in picks_data:
-            manager_entry = league_data['standings']['results'][i]
-            manager_name = manager_entry['player_name']
-            manager_id = manager_entry['entry']
-            
             captain_pick = next((p for p in picks_data['picks'] if p['is_captain']), None)
-            
+
             if captain_pick:
                 captain_id = captain_pick['element']
                 captain_player_info = all_players.get(captain_id)
@@ -1576,14 +1583,25 @@ async def shame(interaction: discord.Interaction):
     # Build a lookup for Discord user IDs from linked users
     linked_users = await asyncio.to_thread(get_linked_users, interaction.guild_id, league_id)
     discord_id_map = {user['fpl_team_id']: user['discord_user_id'] for user in linked_users}
-        
+
+    # Use cached league picks (completed GW = permanent cache)
+    all_picks = await get_league_picks_cached(
+        session, int(league_id), completed_gw,
+        league_standings=league_data,
+        is_finished=True
+    )
+
     # --- Metric Calculation ---
     async def get_manager_metrics(manager):
         fpl_id = manager['entry']
 
-        picks_data, transfers_data = await asyncio.gather(
-            fetch_fpl_api(session, f"{BASE_API_URL}entry/{fpl_id}/event/{completed_gw}/picks/", cache_key=f"picks_entry_{fpl_id}", cache_gw=completed_gw),
-            fetch_fpl_api(session, f"{BASE_API_URL}entry/{fpl_id}/transfers/", cache_key=f"transfers_entry_{fpl_id}", cache_gw=completed_gw)
+        # Get picks from cache, fetch transfers individually
+        picks_data = all_picks.get(fpl_id)
+        transfers_data = await fetch_fpl_api(
+            session,
+            f"{BASE_API_URL}entry/{fpl_id}/transfers/",
+            cache_key=f"transfers_entry_{fpl_id}",
+            cache_gw=completed_gw
         )
 
         if not picks_data or 'picks' not in picks_data:
