@@ -354,20 +354,41 @@ class FPLBot(commands.Bot):
                 self.live_fpl_data = None
                 return
 
-            live_event = next((event for event in bootstrap_data['events'] if event['is_current']), None)
-            
-            if not live_event or live_event.get('finished', False) or not live_event.get('data_checked', False):
+            # Find the current gameweek
+            current_event = next((event for event in bootstrap_data['events'] if event['is_current']), None)
+
+            if not current_event:
                 if self.live_fpl_data is not None:
-                    print("Gameweek is no longer live. Clearing live data cache.")
+                    print("No current gameweek found. Clearing live data cache.")
                     self.live_fpl_data = None
                 return
-            
-            current_gw = live_event['id']
+
+            current_gw = current_event['id']
+
+            # Fetch fixtures for this gameweek to check if any matches are in progress
+            fixtures = await fetch_fpl_api(self.session, f"{BASE_API_URL}fixtures/?event={current_gw}")
+            if not fixtures:
+                self.live_fpl_data = None
+                return
+
+            # Check if any fixture is currently live (started but not finished)
+            # A fixture is live if: started=True AND finished_provisional=False
+            live_fixtures = [f for f in fixtures if f.get('started', False) and not f.get('finished_provisional', True)]
+
+            if not live_fixtures:
+                if self.live_fpl_data is not None:
+                    print("No live fixtures. Clearing live data cache.")
+                    self.live_fpl_data = None
+                return
+
+            # We have live fixtures, fetch the live event data
             live_data = await fetch_fpl_api(self.session, f"{BASE_API_URL}event/{current_gw}/live/")
             if live_data:
                 live_data['gw'] = current_gw
-                live_data['is_finished'] = live_event.get('finished', False)
+                live_data['fixtures'] = fixtures  # Include fixtures for goal detection
+                live_data['is_finished'] = current_event.get('finished', False)
                 self.live_fpl_data = live_data
+                print(f"Live data updated for GW {current_gw}. {len(live_fixtures)} fixture(s) in progress.")
             else:
                 self.live_fpl_data = None
         except Exception as e:
@@ -428,12 +449,17 @@ class FPLBot(commands.Bot):
                     league_id = sub['league_id']
 
                     # --- Caching ---
-                    # Ensure picks and transfers are cached for this league and GW
-                    if self.picks_cache.get('gw') != current_gw or league_id not in self.picks_cache:
-                        self.picks_cache = {'gw': current_gw, league_id: {}}
-                        self.transfers_cache = {'gw': current_gw, league_id: {}}
+                    # Reset cache if gameweek changed
+                    if self.picks_cache.get('gw') != current_gw:
+                        self.picks_cache = {'gw': current_gw}
+                        self.transfers_cache = {'gw': current_gw}
+
+                    # Fetch data for this league if not already cached
+                    if league_id not in self.picks_cache:
+                        self.picks_cache[league_id] = {}
+                        self.transfers_cache[league_id] = {}
                         linked_users = await asyncio.to_thread(get_linked_users, channel.guild.id, league_id)
-                        
+
                         async def fetch_manager_data(user):
                             picks, transfers = await asyncio.gather(
                                 fetch_fpl_api(self.session, f"{BASE_API_URL}entry/{user['fpl_team_id']}/event/{current_gw}/picks/"),
@@ -441,7 +467,7 @@ class FPLBot(commands.Bot):
                             )
                             if picks: self.picks_cache[league_id][user['discord_user_id']] = picks
                             if transfers: self.transfers_cache[league_id][user['discord_user_id']] = transfers
-                        
+
                         await asyncio.gather(*[fetch_manager_data(u) for u in linked_users])
 
                     # --- Logic ---
