@@ -5,12 +5,27 @@ import aiohttp
 import os
 import json
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
-import io
 import asyncio
-import sqlite3
 from dotenv import load_dotenv
-from typing import Literal
+
+# Import from bot modules
+from bot.database import (
+    init_database, upsert_league_teams, get_fpl_id_for_user,
+    get_linked_user_for_team, link_user_to_team, get_unclaimed_teams,
+    get_all_teams_for_autocomplete, get_team_by_fpl_id, get_linked_users,
+    get_all_league_teams, is_goal_subscribed, add_goal_subscription,
+    remove_goal_subscription, get_all_goal_subscriptions,
+    is_transfer_alert_subscribed, set_transfer_alert_subscription,
+)
+from bot.api import (
+    fetch_fpl_api, get_current_gameweek, get_last_completed_gameweek,
+    get_league_managers, get_live_manager_details, get_manager_transfer_activity,
+    set_api_semaphore, BASE_API_URL, CACHE_DIR,
+)
+from bot.image_generator import (
+    generate_team_image, generate_dreamteam_image, format_manager_link,
+    build_manager_url,
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -18,10 +33,6 @@ load_dotenv()
 # --- CONFIGURATION ---
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 CONFIG_PATH = Path("config/league_config.json")
-DB_PATH = Path("config/fpl_bot.db")
-CACHE_DIR = Path("cache")
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
 
 def load_league_config():
     if CONFIG_PATH.exists():
@@ -32,251 +43,18 @@ def load_league_config():
             pass
     return {"guilds": {}, "channels": {}}
 
-
 def save_league_config():
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with CONFIG_PATH.open("w", encoding="utf-8") as f:
         json.dump(league_config, f, indent=2)
 
-
 league_config = load_league_config()
-
-
-def init_database():
-    """Initializes the database and creates/migrates tables if they don't exist."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-
-        # Check if league_teams has the old discord_user_id column
-        cur.execute("PRAGMA table_info(league_teams)")
-        columns = [row[1] for row in cur.fetchall()]
-        if 'discord_user_id' in columns:
-            print("Old schema detected. Migrating league_teams table...")
-            cur.execute("CREATE TABLE IF NOT EXISTS league_teams_new (fpl_team_id INTEGER PRIMARY KEY, league_id INTEGER NOT NULL, team_name TEXT NOT NULL, manager_name TEXT NOT NULL)")
-            cur.execute("INSERT INTO league_teams_new (fpl_team_id, league_id, team_name, manager_name) SELECT fpl_team_id, league_id, team_name, manager_name FROM league_teams")
-            cur.execute("DROP TABLE league_teams")
-            cur.execute("ALTER TABLE league_teams_new RENAME TO league_teams")
-            print("Migration complete.")
-
-        # Ensure league_teams table exists (for fresh setups)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS league_teams (
-                fpl_team_id INTEGER PRIMARY KEY,
-                league_id INTEGER NOT NULL,
-                team_name TEXT NOT NULL,
-                manager_name TEXT NOT NULL
-            )
-        """)
-
-        # Create the new user_links table for per-server linking
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS user_links (
-                guild_id TEXT NOT NULL,
-                discord_user_id TEXT NOT NULL,
-                fpl_team_id INTEGER NOT NULL,
-                PRIMARY KEY (guild_id, discord_user_id),
-                UNIQUE (guild_id, fpl_team_id)
-            )
-        """)
-
-        # Create and migrate goal_subscriptions table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS goal_subscriptions (
-                channel_id TEXT PRIMARY KEY,
-                league_id INTEGER NOT NULL,
-                transfer_alerts_enabled BOOLEAN NOT NULL DEFAULT 0
-            )
-        """)
-        # This handles migration for older versions that didn't have the new column
-        cur.execute("PRAGMA table_info(goal_subscriptions)")
-        columns = [row[1] for row in cur.fetchall()]
-        if 'transfer_alerts_enabled' not in columns:
-            print("Migrating goal_subscriptions table for transfer alerts...")
-            cur.execute("ALTER TABLE goal_subscriptions ADD COLUMN transfer_alerts_enabled BOOLEAN NOT NULL DEFAULT 0")
-            print("Migration complete.")
-
-        con.commit()
-
-
-def upsert_league_teams(league_id, teams):
-    """Inserts or updates team information in the database."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        for team in teams:
-            cur.execute("""
-                INSERT INTO league_teams (fpl_team_id, league_id, team_name, manager_name)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(fpl_team_id) DO UPDATE SET
-                    team_name = excluded.team_name,
-                    manager_name = excluded.manager_name
-            """, (team['entry'], league_id, team['entry_name'], team['player_name']))
-        con.commit()
-
-
-def get_fpl_id_for_user(guild_id: int, user_id: int):
-    """Gets the FPL team ID linked to a Discord user in a specific guild."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("SELECT fpl_team_id FROM user_links WHERE guild_id = ? AND discord_user_id = ?", (str(guild_id), str(user_id)))
-        result = cur.fetchone()
-        return result[0] if result else None
-
-
-def get_linked_user_for_team(guild_id: int, fpl_team_id: int):
-    """Gets the Discord user ID linked to an FPL team in a specific guild."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("SELECT discord_user_id FROM user_links WHERE guild_id = ? AND fpl_team_id = ?", (str(guild_id), fpl_team_id))
-        result = cur.fetchone()
-        return result[0] if result else None
-
-
-def link_user_to_team(guild_id: int, user_id: int, fpl_team_id: int):
-    """Links a Discord user to an FPL team in a specific guild, overwriting any previous link for that user in that guild."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("INSERT OR REPLACE INTO user_links (guild_id, discord_user_id, fpl_team_id) VALUES (?, ?, ?)", (str(guild_id), str(user_id), fpl_team_id))
-        con.commit()
-
-
-def get_unclaimed_teams(league_id: int, guild_id: int, search_term: str):
-    """Gets a list of teams in a league that are not claimed in the specific guild."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        # Find all teams in the league that are NOT in the user_links table for the current guild
-        cur.execute("""
-            SELECT fpl_team_id, team_name, manager_name 
-            FROM league_teams
-            WHERE league_id = ? 
-              AND (team_name LIKE ? OR manager_name LIKE ?)
-              AND fpl_team_id NOT IN (
-                SELECT fpl_team_id FROM user_links WHERE guild_id = ?
-              )
-            LIMIT 25
-        """, (league_id, f"%{search_term}%", f"%{search_term}%", str(guild_id)))
-        return cur.fetchall()
-
-def get_all_teams_for_autocomplete(league_id: int, search_term: str):
-    """Gets a list of all teams for autocomplete."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("""
-            SELECT fpl_team_id, team_name, manager_name FROM league_teams
-            WHERE league_id = ? AND (team_name LIKE ? OR manager_name LIKE ?)
-            LIMIT 25
-        """, (league_id, f"%{search_term}%", f"%{search_term}%"))
-        return cur.fetchall()
-
-
-def get_team_by_fpl_id(fpl_team_id: int):
-    """Gets all details for a specific FPL team."""
-    with sqlite3.connect(DB_PATH) as con:
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-        cur.execute("SELECT * FROM league_teams WHERE fpl_team_id = ?", (fpl_team_id,))
-        return cur.fetchone()
-
-
-def get_linked_users(guild_id: int, league_id: int):
-    """Gets a list of all FPL teams that are linked to a Discord user in a specific guild."""
-    with sqlite3.connect(DB_PATH) as con:
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-        cur.execute("""
-            SELECT T.fpl_team_id, L.discord_user_id, T.manager_name 
-            FROM league_teams T
-            INNER JOIN user_links L ON T.fpl_team_id = L.fpl_team_id
-            WHERE T.league_id = ? AND L.guild_id = ?
-        """, (league_id, str(guild_id)))
-        return cur.fetchall()
-
-def get_all_league_teams(guild_id: int, league_id: int):
-    """Gets a list of all teams for a league, including the linked discord user if one exists for the guild."""
-    with sqlite3.connect(DB_PATH) as con:
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-        cur.execute("""
-            SELECT T.fpl_team_id, L.discord_user_id, T.manager_name 
-            FROM league_teams T
-            LEFT JOIN user_links L ON T.fpl_team_id = L.fpl_team_id AND L.guild_id = ?
-            WHERE T.league_id = ?
-        """, (str(guild_id), league_id))
-        return cur.fetchall()
-
-
-def is_goal_subscribed(channel_id: int):
-    """Checks if a channel is subscribed to goal alerts."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("SELECT 1 FROM goal_subscriptions WHERE channel_id = ?", (str(channel_id),))
-        return cur.fetchone() is not None
-
-def add_goal_subscription(channel_id: int, league_id: int):
-    """Adds a channel to the goal alert subscription list."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("INSERT INTO goal_subscriptions (channel_id, league_id) VALUES (?, ?)", (str(channel_id), league_id))
-        con.commit()
-
-def remove_goal_subscription(channel_id: int):
-    """Removes a channel from the goal alert subscription list."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("DELETE FROM goal_subscriptions WHERE channel_id = ?", (str(channel_id),))
-        con.commit()
-
-def get_all_goal_subscriptions():
-    """Gets all channel IDs and their league IDs subscribed to goal alerts."""
-    with sqlite3.connect(DB_PATH) as con:
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-        cur.execute("SELECT channel_id, league_id, transfer_alerts_enabled FROM goal_subscriptions")
-        return cur.fetchall()
-
-
-def is_transfer_alert_subscribed(channel_id: int):
-    """Checks if a channel is subscribed to transfer flop alerts."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("SELECT transfer_alerts_enabled FROM goal_subscriptions WHERE channel_id = ?", (str(channel_id),))
-        result = cur.fetchone()
-        return result[0] if result and result[0] else False
-
-def set_transfer_alert_subscription(channel_id: int, status: bool):
-    """Sets the transfer alert subscription status for a channel."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cur.execute("UPDATE goal_subscriptions SET transfer_alerts_enabled = ? WHERE channel_id = ?", (status, str(channel_id)))
-        con.commit()
-
-
-def _load_cached_json_sync(path: Path):
-    if path.exists():
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return None
-    return None
-
-async def load_cached_json(path: Path):
-    return await asyncio.to_thread(_load_cached_json_sync, path)
-
-def _save_cached_json_sync(path: Path, payload: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f)
-
-async def save_cached_json(path: Path, payload: dict):
-    await asyncio.to_thread(_save_cached_json_sync, path, payload)
-
 
 def set_league_mapping(scope: str, scope_id: int, league_id: int):
     key = "channels" if scope == "channel" else "guilds"
     league_config.setdefault(key, {})
     league_config[key][str(scope_id)] = {"league_id": str(league_id)}
     save_league_config()
-
 
 def get_configured_league_id(channel_id: int | None, guild_id: int | None):
     if channel_id is not None:
@@ -289,7 +67,6 @@ def get_configured_league_id(channel_id: int | None, guild_id: int | None):
             return guild_entry["league_id"]
     return None
 
-
 async def ensure_league_id(interaction: discord.Interaction):
     league_id = get_configured_league_id(interaction.channel_id, getattr(interaction, "guild_id", None))
     if league_id:
@@ -301,26 +78,8 @@ async def ensure_league_id(interaction: discord.Interaction):
     )
     return None
 
-
 def get_league_id_for_context(interaction: discord.Interaction):
     return get_configured_league_id(interaction.channel_id, getattr(interaction, "guild_id", None))
-
-# --- FILE PATHS ---
-BACKGROUND_IMAGE_PATH = "mobile-pitch-graphic.png"
-FONT_PATH = "font.ttf"
-HEADSHOTS_DIR = "player_headshots"
-JERSEYS_DIR = "team_jerseys"
-
-# --- API & DATA ---
-BASE_API_URL = "https://fantasy.premierleague.com/api/"
-REQUEST_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
-}
-
-# --- LAYOUT & STYLING (from your original script) ---
-NAME_FONT_SIZE, POINTS_FONT_SIZE, CAPTAIN_FONT_SIZE, SUMMARY_FONT_SIZE = 20, 18, 22, 24
-POINTS_BOX_EXTRA_PADDING = 4
-
 
 class FPLBot(commands.Bot):
     """A Discord bot for displaying FPL league and team information."""
@@ -339,6 +98,7 @@ class FPLBot(commands.Bot):
         init_database()
         self.session = aiohttp.ClientSession()
         self.api_semaphore = asyncio.Semaphore(10)
+        set_api_semaphore(self.api_semaphore)  # Initialize API rate limiter
         self.live_data_loop.start()
         self.goal_check_loop.start()
         await self.tree.sync()
@@ -518,650 +278,6 @@ class FPLBot(commands.Bot):
 
 bot = FPLBot()
 
-# --- FPL API HELPER FUNCTIONS (Async) ---
-async def fetch_fpl_api(session, url, cache_key=None, cache_gw=None, force_refresh=False):
-    """Fetches data from the FPL API asynchronously."""
-    cache_path = None
-    if cache_key:
-        cache_suffix = f"_gw{cache_gw}" if cache_gw is not None else ""
-        cache_path = CACHE_DIR / f"{cache_key}{cache_suffix}.json"
-        cached = await load_cached_json(cache_path)
-        if cached and not force_refresh:
-            return cached.get("data", cached)
-
-    try:
-        async with session.get(url, headers=REQUEST_HEADERS) as response:
-            if response.status == 200:
-                data = await response.json()
-                if cache_path and not force_refresh:
-                    payload = {"data": data, "gameweek": cache_gw}
-                    await save_cached_json(cache_path, payload)
-                return data
-            else:
-                print(f"Error fetching {url}: Status {response.status}")
-                return None
-        sem = getattr(bot, "api_semaphore", None)
-        if sem:
-            await sem.acquire()
-        try:
-            async with session.get(url, headers=REQUEST_HEADERS) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if cache_path and not force_refresh:
-                        payload = {"data": data, "gameweek": cache_gw}
-                        await save_cached_json(cache_path, payload)
-                    return data
-                else:
-                    print(f"Error fetching {url}: Status {response.status}")
-                    return None
-        finally:
-            if sem:
-                sem.release()
-    except aiohttp.ClientError as e:
-        print(f"Request error for {url}: {e}")
-        return None
-
-async def get_current_gameweek(session):
-    """Determines the current FPL gameweek."""
-    bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
-    if bootstrap_data:
-        current_event = next((event for event in bootstrap_data['events'] if event['is_current']), None)
-        return current_event['id'] if current_event else None
-    return None
-
-async def get_last_completed_gameweek(session):
-    """Determines the most recently completed FPL gameweek."""
-    bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
-    if bootstrap_data:
-        completed_events = [event for event in bootstrap_data['events'] if event['finished']]
-        if completed_events:
-            return max(completed_events, key=lambda x: x['id'])['id']
-    return None
-
-async def get_league_managers(session, league_id):
-    """Fetches all manager names and IDs for the specified league."""
-    league_url = f"{BASE_API_URL}leagues-classic/{league_id}/standings/?page_standings=1"
-    league_data = await fetch_fpl_api(session, league_url, cache_key=f"league_{league_id}_standings_p1")
-    if league_data and 'standings' in league_data and 'results' in league_data['standings']:
-        return {
-            manager['player_name']: manager['entry']
-            for manager in league_data['standings']['results']
-        }
-    return {}
-
-# --- NEW REFACTORED HELPER FOR LIVE POINT CALCULATION ---
-async def get_live_manager_details(session, manager_entry, current_gw, live_points_map, all_players_map, live_data, is_finished=False):
-    """Fetches picks/history for a manager and calculates their score, handling auto-subs for finished GWs."""
-    manager_id = manager_entry['entry']
-    picks_task = fetch_fpl_api(
-        session,
-        f"{BASE_API_URL}entry/{manager_id}/event/{current_gw}/picks/",
-        cache_key=f"picks_entry_{manager_id}",
-        cache_gw=current_gw,
-        force_refresh=is_finished  # Refresh if the gameweek is over to get final subs/points
-    )
-    history_task = fetch_fpl_api(
-        session,
-        f"{BASE_API_URL}entry/{manager_id}/history/",
-        cache_key=f"history_entry_{manager_id}",
-        cache_gw=current_gw
-    )
-    picks_data, history_data = await asyncio.gather(picks_task, history_task)
-
-    if not picks_data or not history_data:
-        return None
-
-    # --- Determine final GW points ---
-    final_gw_points = 0
-    scoring_picks = []
-
-    # The API's official points are the source of truth if available for a finished GW
-    if is_finished and picks_data.get('automatic_subs'):
-        final_gw_points = picks_data['entry_history']['points']
-        
-        # Determine scoring picks for the image based on auto-subs
-        automatic_subs = picks_data.get('automatic_subs', [])
-        subs_in = {sub['element_in'] for sub in automatic_subs}
-        subs_out = {sub['element_out'] for sub in automatic_subs}
-        
-        for p in picks_data['picks']:
-            is_starter = p['position'] <= 11
-            if (is_starter and p['element'] not in subs_out) or \
-               (not is_starter and p['element'] in subs_in):
-                scoring_picks.append(p)
-    else:
-        # --- Manual calculation (for live GWs or when official points are not ready) ---
-        gw_points = 0
-        active_chip = picks_data.get('active_chip')
-
-        # Determine captain status first
-        captain_pick = next((p for p in picks_data['picks'] if p['is_captain']), None)
-        captain_played = True
-        if captain_pick:
-            captain_id = captain_pick['element']
-            captain_minutes = live_points_map.get(captain_id, {}).get('minutes', 0)
-
-            # Find the captain's team ID from bootstrap data
-            captain_player_details = all_players_map.get(captain_id)
-            captain_team_id = captain_player_details['team'] if captain_player_details else None
-            
-            # Find the captain's fixture from the live data
-            captain_fixture = None
-            if captain_team_id and 'fixtures' in live_data:
-                captain_fixture = next((f for f in live_data['fixtures'] if f['team_h'] == captain_team_id or f['team_a'] == captain_team_id), None)
-            
-            # Captain is considered not to have played if his minutes are 0 AND his game is over
-            if captain_minutes == 0 and captain_fixture and captain_fixture.get('finished', False):
-                captain_played = False
-            # If the captain's game hasn't finished, he's still considered 'playing' for captaincy purposes
-            elif captain_minutes == 0 and (not captain_fixture or not captain_fixture.get('finished', False)):
-                captain_played = True
-
-        # --- MANUAL SUBSTITUTION LOGIC ---
-        if active_chip == 'bboost':
-            scoring_picks = picks_data['picks']
-        else:
-            starters = [p for p in picks_data['picks'] if p['position'] <= 11]
-            bench = sorted([p for p in picks_data['picks'] if p['position'] > 11], key=lambda x: x['position'])
-            
-            squad = list(starters) # This is the list of players we will modify
-
-            # 1. Substitute goalkeeper if needed
-            starting_gk = next((p for p in squad if all_players_map[p['element']]['element_type'] == 1), None)
-            if starting_gk and live_points_map.get(starting_gk['element'], {}).get('minutes', 0) == 0:
-                sub_gk = next((p for p in bench if all_players_map[p['element']]['element_type'] == 1), None)
-                if sub_gk and live_points_map.get(sub_gk['element'], {}).get('minutes', 0) > 0:
-                    squad = [sub_gk if p == starting_gk else p for p in squad]
-
-            # 2. Substitute outfield players
-            for sub_in_player in bench:
-                if all_players_map[sub_in_player['element']]['element_type'] == 1 or live_points_map.get(sub_in_player['element'], {}).get('minutes', 0) == 0:
-                    continue
-
-                player_subbed_out = None
-                
-                # Find a player to replace
-                for i, player_to_replace in enumerate(squad):
-                    is_outfield = all_players_map[player_to_replace['element']]['element_type'] != 1
-                    did_not_play = live_points_map.get(player_to_replace['element'], {}).get('minutes', 0) == 0
-                    
-                    if is_outfield and did_not_play:
-                        # Create a potential new squad with the sub
-                        potential_squad = list(squad)
-                        potential_squad[i] = sub_in_player
-                        
-                        # Validate formation
-                        counts = {1:0, 2:0, 3:0, 4:0}
-                        for p in potential_squad:
-                            player_type = all_players_map[p['element']]['element_type']
-                            counts[player_type] += 1
-                        
-                        if counts[1] == 1 and counts[2] >= 3 and counts[3] >= 2 and counts[4] >= 1:
-                            player_subbed_out = player_to_replace
-                            squad = potential_squad
-                            break # Sub successful, move to next bench player
-                
-                if player_subbed_out:
-                    break
-
-            scoring_picks = squad
-        
-        # Calculate points from the determined scoring players
-        for p in scoring_picks:
-            player_points = live_points_map.get(p['element'], {}).get('total_points', 0)
-            
-            # Start with a base multiplier of 1 for any player in the scoring list
-            effective_multiplier = 1
-            
-            # Apply captaincy rules
-            if p['is_captain']:
-                if captain_played:
-                    effective_multiplier = 3 if active_chip == '3xc' else 2
-                else: # Captain didn't play and their game is over
-                    effective_multiplier = 1
-            elif p['is_vice_captain'] and not captain_played:
-                vice_captain_minutes = live_points_map.get(p['element'], {}).get('minutes', 0)
-                if vice_captain_minutes > 0:
-                    # Promote VC only if they are in the final scoring picks and have played
-                    if any(sp['element'] == p['element'] for sp in scoring_picks):
-                        effective_multiplier = 2
-            
-            p['final_multiplier'] = effective_multiplier
-        
-            gw_points += player_points * effective_multiplier
-
-        transfer_cost = picks_data['entry_history']['event_transfers_cost']
-        final_gw_points = gw_points - transfer_cost
-
-
-    # --- Calculate total points ---
-    pre_gw_total = 0
-    if current_gw > 1:
-        prev_gw_history = next((gw for gw in history_data['current'] if gw['event'] == current_gw - 1), None)
-        if prev_gw_history:
-            pre_gw_total = prev_gw_history['total_points']
-    
-    live_total_points = pre_gw_total + final_gw_points
-
-    # --- Final data ---
-    # The 'picks' data needs to be passed for image generation
-    picks_data['scoring_picks'] = scoring_picks
-    
-    # Calculate players played for the table view (always just the starting XI for simplicity)
-    starters = [p for p in picks_data['picks'] if p['position'] <= 11]
-    players_played_count = sum(1 for p in starters if live_points_map.get(p['element'], {}).get('minutes', 0) > 0)
-
-    return {
-        "id": manager_id,
-        "name": manager_entry['player_name'],
-        "team_name": manager_entry['entry_name'],
-        "live_total_points": live_total_points,
-        "final_gw_points": final_gw_points,
-        "players_played": players_played_count,
-        "picks_data": picks_data
-    }
-
-# --- IMAGE GENERATION LOGIC ---
-
-def format_player_price(player):
-    """Return player's price as £X.Xm string."""
-    return f"£{player.get('now_cost', 0) / 10:.1f}m"
-
-
-def build_manager_url(entry_id, gameweek=None):
-    """Return the FPL website URL for a manager's team."""
-    if gameweek:
-        return f"https://fantasy.premierleague.com/entry/{entry_id}/event/{gameweek}"
-    return f"https://fantasy.premierleague.com/entry/{entry_id}/history/"
-
-
-def format_manager_link(label, entry_id, gameweek=None):
-    """Wrap a label in Markdown linking to the manager's FPL team."""
-    url = build_manager_url(entry_id, gameweek)
-    return f"[{label}]({url})"
-
-
-async def get_manager_transfer_activity(session, manager_entry_id, gameweek):
-    """Fetch transfer, chip, and cost info for a manager for the given gameweek."""
-    transfers_task = fetch_fpl_api(
-        session,
-        f"{BASE_API_URL}entry/{manager_entry_id}/transfers/",
-        cache_key=f"transfers_entry_{manager_entry_id}",
-        cache_gw=gameweek
-    )
-    picks_task = fetch_fpl_api(
-        session,
-        f"{BASE_API_URL}entry/{manager_entry_id}/event/{gameweek}/picks/",
-        cache_key=f"picks_entry_{manager_entry_id}",
-        cache_gw=gameweek
-    )
-    transfers_data, picks_data = await asyncio.gather(transfers_task, picks_task)
-    async def fetch_data(refresh=False):
-        t_task = fetch_fpl_api(
-            session,
-            f"{BASE_API_URL}entry/{manager_entry_id}/transfers/",
-            cache_key=f"transfers_entry_{manager_entry_id}",
-            cache_gw=gameweek,
-            force_refresh=refresh
-        )
-        p_task = fetch_fpl_api(
-            session,
-            f"{BASE_API_URL}entry/{manager_entry_id}/event/{gameweek}/picks/",
-            cache_key=f"picks_entry_{manager_entry_id}",
-            cache_gw=gameweek,
-            force_refresh=refresh
-        )
-        return await asyncio.gather(t_task, p_task)
-
-    transfers_data, picks_data = await fetch_data(refresh=False)
-
-    if transfers_data is None or picks_data is None:
-        return None
-
-    entry_history = picks_data.get("entry_history", {})
-    transfers_made_count = entry_history.get("event_transfers", 0)
-    transfers_this_week = [t for t in transfers_data if t.get("event") == gameweek]
-
-    # If picks say transfers were made, but transfer history is empty, cache is likely stale.
-    if transfers_made_count > 0 and not transfers_this_week:
-        transfers_data, picks_data = await fetch_data(refresh=True)
-        if transfers_data is None or picks_data is None:
-            return None
-        # Refresh derived data
-        entry_history = picks_data.get("entry_history", {})
-        transfers_this_week = [t for t in transfers_data if t.get("event") == gameweek]
-
-    transfers_this_week.sort(key=lambda t: t.get("time", ""))
-
-    chip = picks_data.get("active_chip")
-    entry_history = picks_data.get("entry_history", {})
-    transfer_cost = entry_history.get("event_transfers_cost", 0)
-
-    return {
-        "transfers": transfers_this_week,
-        "chip": chip,
-        "transfer_cost": transfer_cost
-    }
-
-
-def calculate_player_coordinates(picks, all_players, width, height):
-    starters = [p for p in picks if p['position'] <= 11]
-    bench = [p for p in picks if p['position'] > 11]
-    bench.sort(key=lambda x: x['position'])  # Ensure bench is ordered
-
-    positions = {1: [], 2: [], 3: [], 4: []}
-    for p in starters:
-        player_type = all_players[p['element']]['element_type']
-        positions[player_type].append(p)
-
-    coords = {}
-    
-    # Vertical Layout Y-coordinates (approximate ratios for mobile pitch)
-    y_ratios = {1: 0.14, 2: 0.30, 3: 0.49, 4: 0.68}
-    
-    # Calculate coordinates for starters
-    for pos_type, y_ratio in y_ratios.items():
-        players = positions[pos_type]
-        if not players: continue
-        y = int(height * y_ratio)
-        for i, p in enumerate(players):
-            x = int(width * (i + 0.5) / len(players))
-            coords[p['element']] = (x, y)
-
-    # Calculate coordinates for bench (Horizontal row at bottom)
-    bench_y = int(height * 0.88)
-    for i, p in enumerate(bench):
-        x = int(width * (i + 0.5) / len(bench))
-        coords[p['element']] = (x, bench_y)
-    return coords
-
-POINTS_BOX_EXTRA_PADDING = 4
-
-def generate_team_image(fpl_data, summary_data, is_finished=False):
-    try:
-        pitch = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
-        base_layer = Image.new("RGBA", pitch.size, "#1A1A1E")
-        background = Image.alpha_composite(base_layer, pitch)
-        draw = ImageDraw.Draw(background)
-        name_font = ImageFont.truetype(FONT_PATH, NAME_FONT_SIZE)
-        points_font = ImageFont.truetype(FONT_PATH, POINTS_FONT_SIZE)
-        captain_font = ImageFont.truetype(FONT_PATH, CAPTAIN_FONT_SIZE)
-        summary_font = ImageFont.truetype(FONT_PATH, SUMMARY_FONT_SIZE)
-        name_sample_bbox = draw.textbbox((0, 0), "Agjpqy", font=name_font)
-        points_sample_bbox = draw.textbbox((0, 0), "Agjpqy 0123456789", font=points_font)
-        fixed_name_box_height = (name_sample_bbox[3] - name_sample_bbox[1]) + 4
-        fixed_points_box_height = (points_sample_bbox[3] - points_sample_bbox[1]) + 4
-    except Exception as e:
-        print(f"Error loading resources: {e}")
-        return None
-
-    all_players = {p['id']: p for p in fpl_data['bootstrap']['elements']}
-    all_teams = {t['id']: t for t in fpl_data['bootstrap']['teams']}
-    live_points = {p['id']: p['stats'] for p in fpl_data['live']['elements']}
-    width, height = background.size
-    coordinates = calculate_player_coordinates(fpl_data['picks']['picks'], all_players, width, height)
-
-    # Determine the final set of scoring players from the provided data
-    scoring_picks_data = fpl_data['picks'].get('scoring_picks', [])
-    scoring_player_ids = {p['element'] for p in scoring_picks_data}
-
-    for player_pick in fpl_data['picks']['picks']:
-        player_id = player_pick['element']
-        player_info = all_players[player_id]
-        player_name = player_info['web_name']
-        base_points = live_points.get(player_id, {}).get('total_points', 0)
-        
-        is_starter = player_pick['position'] <= 11
-        was_subbed_out = is_starter and player_id not in scoring_player_ids and is_finished
-        was_subbed_in = not is_starter and player_id in scoring_player_ids and is_finished
-
-        # Determine points to display
-        display_points = base_points
-        scoring_pick_details = next((p for p in scoring_picks_data if p['element'] == player_id), None)
-
-        if scoring_pick_details:
-            final_multiplier = scoring_pick_details.get('final_multiplier', 1)
-            display_points = base_points * final_multiplier
-        
-        points_text = f"{display_points} pts"
-        
-        # For subbed out starters, show their base points but they won't be summed
-        if was_subbed_out:
-            points_text = f"({base_points}) pts"
-
-        # --- Drawing logic ---
-        asset_img = None
-        asset_size = (88, 112)
-        headshot_path = os.path.join(HEADSHOTS_DIR, f"{player_name.replace(' ', '_')}_{player_id}.png")
-        try:
-            asset_img = Image.open(headshot_path).convert("RGBA")
-        except FileNotFoundError:
-            team_id = player_info['team']
-            team_name = all_teams[team_id]['name'].replace(' ', '_')
-            kit = 'goalkeeper' if player_info['element_type'] == 1 else 'home'
-            jersey_path = os.path.join(JERSEYS_DIR, f"{team_name}_{kit}.webp")
-            asset_size = (110, 110)
-            try:
-                asset_img = Image.open(jersey_path).convert("RGBA")
-            except FileNotFoundError:
-                continue
-        asset_img = asset_img.resize(asset_size, Image.LANCZOS)
-        x, y = coordinates[player_id]
-        paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
-        
-        # Add visual indicators for subs
-        if was_subbed_out:
-            red_overlay = Image.new("RGBA", asset_img.size, (255, 0, 0, 80))
-            asset_img = Image.alpha_composite(asset_img, red_overlay)
-        if was_subbed_in:
-            green_overlay = Image.new("RGBA", asset_img.size, (0, 255, 0, 80))
-            asset_img = Image.alpha_composite(asset_img, green_overlay)
-
-        background.paste(asset_img, (paste_x, paste_y), asset_img)
-
-        name_text = player_name
-        if len(name_text) > 10:
-            name_text = name_text[:8] + "..."
-        name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
-        points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
-        box_width = max(name_bbox[2], points_bbox[2]) + 10
-        name_box_height = fixed_name_box_height
-        name_box_x = x - box_width // 2
-        name_box_y = y + 55
-        points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
-        points_box_x = name_box_x
-        points_box_y = name_box_y + name_box_height
-        draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
-        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill="#015030")
-        draw.text((x - name_bbox[2] / 2, name_box_y - 2), name_text, font=name_font, fill="white")
-        draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
-
-        if player_pick['is_captain']:
-            active_chip = fpl_data['picks'].get('active_chip')
-            captain_text = "TC" if active_chip == '3xc' else "C"
-            draw.text((paste_x + 80, paste_y - 5), captain_text, font=captain_font, fill="black", stroke_width=2, stroke_fill="yellow")
-        elif player_pick['is_vice_captain']:
-            draw.text((paste_x + 80, paste_y - 5), "V", font=captain_font, fill="black", stroke_width=2, stroke_fill="white")
-
-    # Draw Header Info (Team Name, GW Points, Total Points)
-    header_y = 20
-    left_margin = 20
-    
-    # Team Name
-    team_name_text = summary_data.get('team_name', 'My Team')
-    team_font = ImageFont.truetype(FONT_PATH, 28)
-    draw.text((left_margin - 10, header_y - 6), team_name_text, font=team_font, fill="black")
-    
-    # Calculate offset for points info (beside team name)
-    team_bbox = draw.textbbox((0, 0), team_name_text, font=team_font)
-    team_width = team_bbox[2] - team_bbox[0]
-    points_x = left_margin + team_width + 30
-    
-    # GW Points
-    gw_text = f"GW{fpl_data['live'].get('gw', '')} PTS: {summary_data['gw_points']}"
-    draw.text((points_x, header_y - 14), gw_text, font=summary_font, fill="black")
-    
-    # Total Points (below GW points)
-    total_text = f"Total PTS: {summary_data['total_points']}"
-    draw.text((points_x, header_y + 12), total_text, font=summary_font, fill="black")
-
-    img_byte_arr = io.BytesIO()
-    background.convert("RGB").save(img_byte_arr, format='PNG')
-    img_byte_arr.seek(0)
-    return img_byte_arr
-
-def generate_dreamteam_image(fpl_data, summary_data):
-    """Generate dream team image with Player of the Week graphic."""
-    try:
-        pitch = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
-        base_layer = Image.new("RGBA", pitch.size, "#1A1A1E")
-        background = Image.alpha_composite(base_layer, pitch)
-        draw = ImageDraw.Draw(background)
-        name_font = ImageFont.truetype(FONT_PATH, NAME_FONT_SIZE)
-        points_font = ImageFont.truetype(FONT_PATH, POINTS_FONT_SIZE)
-        summary_font = ImageFont.truetype(FONT_PATH, SUMMARY_FONT_SIZE)
-        potw_font = ImageFont.truetype(FONT_PATH, 20)  # Player of the Week font
-        name_sample_bbox = draw.textbbox((0, 0), "Agjpqy", font=name_font)
-        points_sample_bbox = draw.textbbox((0, 0), "Agjpqy 0123456789", font=points_font)
-        fixed_name_box_height = (name_sample_bbox[3] - name_sample_bbox[1]) + 4
-        fixed_points_box_height = (points_sample_bbox[3] - points_sample_bbox[1]) + 4
-    except Exception as e:
-        print(f"Error loading resources: {e}")
-        return None
-
-    all_players = {p['id']: p for p in fpl_data['bootstrap']['elements']}
-    all_teams = {t['id']: t for t in fpl_data['bootstrap']['teams']}
-    live_points = {p['id']: p['stats']['total_points'] for p in fpl_data['live']['elements']}
-    width, height = background.size
-    coordinates = calculate_player_coordinates(fpl_data['picks']['picks'], all_players, width, height)
-
-    # Draw players (same as original team image but without captain/vice captain)
-    for player_pick in fpl_data['picks']['picks']:
-        player_id = player_pick['element']
-        player_info = all_players[player_id]
-        player_name = player_info['web_name']
-        base_points = live_points.get(player_id, 0)
-        multiplier = player_pick.get('multiplier', 1)
-        is_bench_player = player_pick['position'] > 11 and multiplier == 0
-        display_points = base_points if is_bench_player else base_points * multiplier
-        asset_img = None
-        asset_size = (88, 112)
-        headshot_path = os.path.join(HEADSHOTS_DIR, f"{player_name.replace(' ', '_')}_{player_id}.png")
-        try:
-            asset_img = Image.open(headshot_path).convert("RGBA")
-        except FileNotFoundError:
-            team_id = player_info['team']
-            team_name = all_teams[team_id]['name'].replace(' ', '_')
-            kit = 'goalkeeper' if player_info['element_type'] == 1 else 'home'
-            jersey_path = os.path.join(JERSEYS_DIR, f"{team_name}_{kit}.webp")
-            asset_size = (110, 110)
-            try:
-                asset_img = Image.open(jersey_path).convert("RGBA")
-            except FileNotFoundError:
-                continue
-        asset_img = asset_img.resize(asset_size, Image.LANCZOS)
-        x, y = coordinates[player_id]
-        paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
-        background.paste(asset_img, (paste_x, paste_y), asset_img)
-
-        name_text = player_name
-        if len(name_text) > 10:
-            name_text = name_text[:8] + "..."
-        points_text = f"{display_points} pts"
-        name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
-        points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
-        box_width = max(name_bbox[2], points_bbox[2]) + 10
-        name_box_height = fixed_name_box_height
-        name_box_x = x - box_width // 2
-        name_box_y = y + 55
-        points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
-        points_box_x = name_box_x
-        points_box_y = name_box_y + name_box_height
-        draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
-        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=(0, 135, 81, 150))
-        draw.text((x - name_bbox[2] / 2, name_box_y - 4), name_text, font=name_font, fill="white")
-        draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
-
-    # Draw Header Info for Dream Team
-    header_y = 20
-    left_margin = 20
-    
-    team_font = ImageFont.truetype(FONT_PATH, 32)
-    draw.text((left_margin, header_y), "Dream Team", font=team_font, fill="black")
-    
-    dream_bbox = draw.textbbox((0, 0), "Dream Team", font=team_font)
-    dream_width = dream_bbox[2] - dream_bbox[0]
-    points_x = left_margin + dream_width + 30
-    
-    gw_text = f"Gameweek {summary_data['gameweek']}"
-    draw.text((points_x, header_y + 4), gw_text, font=summary_font, fill="black")
-    
-    total_text = f"Total PTS: {summary_data['total_points']}"
-    draw.text((points_x, header_y + 30), total_text, font=summary_font, fill="black")
-
-    # Draw Player of the Week section
-    potw_data = summary_data['player_of_week']
-    potw_player_info = potw_data['player_info']
-    potw_name = potw_player_info['web_name']
-    potw_points = potw_data['points']
-    
-    # Player of the Week positioning (Top Left)
-    potw_x = 20
-    potw_y = 20
-    
-    # Try to load player headshot for POTW
-    potw_headshot_path = os.path.join(HEADSHOTS_DIR, f"{potw_name.replace(' ', '_')}_{potw_data['id']}.png")
-    potw_img = None
-    try:
-        potw_img = Image.open(potw_headshot_path).convert("RGBA")
-        potw_img = potw_img.resize((60, 76), Image.LANCZOS)
-    except FileNotFoundError:
-        # Fallback to jersey if headshot not found
-        team_id = potw_player_info['team']
-        team_name = all_teams[team_id]['name'].replace(' ', '_')
-        kit = 'goalkeeper' if potw_player_info['element_type'] == 1 else 'home'
-        jersey_path = os.path.join(JERSEYS_DIR, f"{team_name}_{kit}.webp")
-        try:
-            potw_img = Image.open(jersey_path).convert("RGBA")
-            potw_img = potw_img.resize((60, 60), Image.LANCZOS)
-        except FileNotFoundError:
-            pass
-    
-    # Draw POTW background box
-    potw_box_width = 220  # Made wider to fit "Player of the Week" text
-    potw_box_height = 110
-    potw_box = [potw_x, potw_y, potw_x + potw_box_width, potw_y + potw_box_height]
-    draw.rounded_rectangle(potw_box, radius=14, fill="#ffd700")
-    
-    # Draw "Player of the Week" title
-    title_text = "Player of the Week"
-    title_bbox = draw.textbbox((0, 0), title_text, font=potw_font)
-    title_x = potw_x + (potw_box_width - title_bbox[2]) // 2
-    draw.text((title_x, potw_y + 5), title_text, font=potw_font, fill="black")
-    
-    # Draw player image if available
-    if potw_img:
-        img_x = potw_x + 15
-        img_y = potw_y + 30
-        background.paste(potw_img, (img_x, img_y), potw_img)
-        
-        # Draw name and points beside the image
-        name_x = img_x + potw_img.width + 15
-        draw.text((name_x, img_y), potw_name, font=potw_font, fill="black")
-        draw.text((name_x, img_y + 25), f"{potw_points} pts", font=potw_font, fill="black")
-        draw.text((name_x, img_y + 50), f"G: {potw_data['goals']} A: {potw_data['assists']}", font=potw_font, fill="black")
-    else:
-        # Draw text only if no image
-        name_x = potw_x + 15
-        draw.text((name_x, potw_y + 35), potw_name, font=potw_font, fill="black")
-        draw.text((name_x, potw_y + 55), f"{potw_points} pts", font=potw_font, fill="black")
-        draw.text((name_x, potw_y + 75), f"Goals: {potw_data['goals']}, Assists: {potw_data['assists']}", font=potw_font, fill="black")
-
-    img_byte_arr = io.BytesIO()
-    background.convert("RGB").save(img_byte_arr, format='PNG')
-    img_byte_arr.seek(0)
-    return img_byte_arr
-
 # --- DISCORD SLASH COMMANDS ---
 
 @bot.tree.command(name="toggle_goals", description="Enable or disable live goal alerts in this channel.")
@@ -1191,7 +307,6 @@ async def toggle_goals_error(interaction: discord.Interaction, error: app_comman
         await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
         raise error
 
-
 @bot.tree.command(name="toggle_transfer_alerts", description="Enable or disable transfer flop alerts in this channel.")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def toggle_transfer_alerts(interaction: discord.Interaction):
@@ -1219,7 +334,6 @@ async def toggle_transfer_alerts_error(interaction: discord.Interaction, error: 
     else:
         await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
         raise error
-
 
 @bot.tree.command(name="setleague", description="Configure which FPL league this server or channel uses.")
 @app_commands.describe(league_id="The FPL league ID (numbers only).",
@@ -1277,390 +391,183 @@ async def setleague(interaction: discord.Interaction, league_id: int, scope: str
 
     await interaction.followup.send(feedback_message)
 
-
 class AdminApprovalView(discord.ui.View):
-
-
     def __init__(self, fpl_team_id: int, new_user_id: int, guild_id: int):
-
-
-        super().__init__(timeout=86400) # 24 hours
-
-
+        super().__init__(timeout=86400)  # 24 hours
         self.fpl_team_id = fpl_team_id
-
-
         self.new_user_id = new_user_id
-
-
         self.guild_id = guild_id
 
-
-
-
-
         # Create buttons with callbacks
-
-
         approve_button = discord.ui.Button(label="Approve Transfer", style=discord.ButtonStyle.green)
-
-
         approve_button.callback = self.approve_callback
-
-
         self.add_item(approve_button)
 
-
-
-
-
         deny_button = discord.ui.Button(label="Deny Request", style=discord.ButtonStyle.red)
-
-
         deny_button.callback = self.deny_callback
-
-
         self.add_item(deny_button)
 
-
-
-
-
     async def approve_callback(self, interaction: discord.Interaction):
-
-
         await interaction.response.defer()
-
-
-        
-
 
         # Use the new guild-aware linking function
-
-
         await asyncio.to_thread(link_user_to_team, self.guild_id, self.new_user_id, self.fpl_team_id)
 
-
-        
-
-
         # Edit message
-
-
         embed = interaction.message.embeds[0]
-
-
         embed.color = discord.Color.green()
-
-
         embed.description = f"✅ Approved by {interaction.user.mention}"
-
-
-        self.clear_items() # Disable buttons
-
-
+        self.clear_items()  # Disable buttons
         await interaction.message.edit(embed=embed, view=self)
 
-
-        
-
-
         # Notify user
-
-
         new_user = await interaction.client.fetch_user(self.new_user_id)
-
-
         team_data = await asyncio.to_thread(get_team_by_fpl_id, self.fpl_team_id)
-
-
         await new_user.send(f"Your claim for **{team_data['team_name']}** in the server **{interaction.guild.name}** was approved.")
 
-
-
-
-
     async def deny_callback(self, interaction: discord.Interaction):
-
-
         await interaction.response.defer()
 
-
-
-
-
         # Edit message
-
-
         embed = interaction.message.embeds[0]
-
-
         embed.color = discord.Color.red()
-
-
         embed.description = f"⛔ Denied by {interaction.user.mention}"
-
-
-        self.clear_items() # Disable buttons
-
-
+        self.clear_items()  # Disable buttons
         await interaction.message.edit(embed=embed, view=self)
 
-
-
-
-
         # Notify user
-
-
         new_user = await interaction.client.fetch_user(self.new_user_id)
-
-
         team_data = await asyncio.to_thread(get_team_by_fpl_id, self.fpl_team_id)
-
-
         await new_user.send(f"Your claim for **{team_data['team_name']}** in the server **{interaction.guild.name}** was denied.")
 
-
-
-
-
-
-
-
 @bot.tree.command(name="setadminchannel", description="Sets the channel for admin notifications.")
-
-
 @app_commands.describe(channel="The channel to be used for admin notifications.")
-
-
 @app_commands.checks.has_permissions(manage_guild=True)
-
-
 async def setadminchannel(interaction: discord.Interaction, channel: discord.TextChannel):
-
-
     """Sets the admin channel for this server."""
-
-
     await interaction.response.defer(ephemeral=True)
-
-
     league_config.setdefault("admin_channels", {})
-
-
     league_config["admin_channels"][str(interaction.guild_id)] = channel.id
-
-
     save_league_config()
-
-
     await interaction.followup.send(f"Admin channel has been set to {channel.mention}.")
-
-
-
-
 
 @setadminchannel.error
 
-
 async def setadminchannel_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-
 
     if isinstance(error, app_commands.MissingPermissions):
 
-
         await interaction.response.send_message("You need the `Manage Server` permission to use this command.", ephemeral=True)
 
-
     else:
-
 
         await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
 
-
         raise error
-
-
-
-
-
-
-
 
 @bot.tree.command(name="claim", description="Claim your FPL team to link it to your Discord account for this server.")
 
-
 @app_commands.describe(team="The FPL team you want to claim.")
-
 
 async def claim(interaction: discord.Interaction, team: str):
 
-
     await interaction.response.defer(ephemeral=True)
-
-
-
-
 
     if not interaction.guild_id:
 
-
         await interaction.followup.send("This command can only be used in a server.", ephemeral=True)
-
 
         return
 
-
     
-
 
     try:
 
-
         fpl_team_id = int(team)
-
 
     except ValueError:
 
-
         await interaction.followup.send("Invalid team selection. Please choose a team from the autocomplete list.", ephemeral=True)
-
 
         return
 
-
         
-
 
     user_id = interaction.user.id
 
-
     guild_id = interaction.guild_id
-
-
-
-
 
     # Check if team is in the configured league
 
-
     team_data = await asyncio.to_thread(get_team_by_fpl_id, fpl_team_id)
-
 
     if not team_data:
 
-
         await interaction.followup.send("That team could not be found. It might not be in the configured league.", ephemeral=True)
-
 
         return
 
-
-
-
-
     # Check if team is already claimed IN THIS GUILD
-
 
     current_owner_id = await asyncio.to_thread(get_linked_user_for_team, guild_id, fpl_team_id)
 
-
     
-
 
     if current_owner_id is None:
 
-
         # Team is unclaimed in this guild, link it
-
 
         await asyncio.to_thread(link_user_to_team, guild_id, user_id, fpl_team_id)
 
-
         await interaction.followup.send(f"✅ Success! You have been linked to **{team_data['team_name']}** for this server.", ephemeral=True)
-
 
     else:
 
-
         # Team is claimed by someone else, send for admin approval
-
 
         if int(current_owner_id) == user_id:
 
-
             await interaction.followup.send(f"You have already claimed **{team_data['team_name']}** in this server.", ephemeral=True)
 
-
             return
-
-
-
-
 
         admin_channel_id = league_config.get("admin_channels", {}).get(str(interaction.guild_id))
 
-
         if not admin_channel_id:
-
 
             await interaction.followup.send("⚠️ That team is already linked to another user, but no admin channel is configured for this server to handle the conflict.", ephemeral=True)
 
-
             return
-
-
-
-
 
         admin_channel = bot.get_channel(int(admin_channel_id))
 
-
         if not admin_channel:
-
 
             await interaction.followup.send("⚠️ The configured admin channel could not be found.", ephemeral=True)
 
-
             return
 
-
         
-
 
         embed = discord.Embed(
 
-
             title="🚨 Claim Conflict",
-
 
             description=f"<@{user_id}> wants to claim **{team_data['team_name']}**.",
 
-
             color=discord.Color.orange()
-
 
         )
 
-
         embed.add_field(name="Currently Owned By", value=f"<@{current_owner_id}>", inline=False)
-
 
         embed.add_field(name="FPL Team ID", value=str(fpl_team_id), inline=False)
 
-
-
-
-
         view = AdminApprovalView(fpl_team_id, user_id, guild_id)
-
 
         await admin_channel.send(embed=embed, view=view)
 
-
         
-
 
         await interaction.followup.send("⚠️ That team is already linked to another user. An admin approval request has been sent.", ephemeral=True)
 
@@ -1677,7 +584,6 @@ async def claim_autocomplete(interaction: discord.Interaction, current: str):
         for fpl_team_id, team_name, manager_name in unclaimed_teams
     ]
     return choices
-
 
 @bot.tree.command(name="assign", description="Manually assign an FPL team to a Discord user.")
 @app_commands.describe(user="The Discord user to assign the team to.", team="The FPL team to assign.")
@@ -1723,7 +629,6 @@ async def assign_error(interaction: discord.Interaction, error: app_commands.App
     else:
         await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
         raise error
-
 
 @bot.tree.command(name="team", description="Generates an image of a manager's current FPL team.")
 @app_commands.describe(manager="Select the manager's team to view. Leave blank to view your own.")
@@ -2358,7 +1263,6 @@ async def transfers(interaction: discord.Interaction):
         else:
             await interaction.channel.send(embed=embed)
 
-
 @bot.tree.command(name="captains", description="Shows which player each manager captained for the current gameweek.")
 async def captains(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -2432,7 +1336,6 @@ async def captains(interaction: discord.Interaction):
         embed.description = "No captain information found for the current gameweek."
     
     await interaction.followup.send(embed=embed)
-
 
 @bot.tree.command(name="fixtures", description="Shows the upcoming fixtures for a team or all teams.")
 @app_commands.describe(team="The team to show fixtures for. Leave blank for all teams.")
@@ -2533,7 +1436,6 @@ async def fixtures(interaction: discord.Interaction, team: str = None):
 
     await interaction.followup.send(embed=embed)
 
-
 @fixtures.autocomplete('team')
 async def fixtures_autocomplete(interaction: discord.Interaction, current: str):
     session = bot.session
@@ -2554,7 +1456,6 @@ async def fixtures_autocomplete(interaction: discord.Interaction, current: str):
             choices.append(app_commands.Choice(name=team_name, value=str(team['id'])))
     
     return sorted(choices, key=lambda x: x.name)[:25]
-
 
 @bot.tree.command(name="h2h", description="Compare two FPL teams for the current gameweek.")
 @app_commands.describe(manager_a="The first manager to compare.", manager_b="The second manager to compare.")
@@ -2637,7 +1538,6 @@ async def h2h(interaction: discord.Interaction, manager_a: str, manager_b: str):
     
     await interaction.followup.send(embed=embed)
 
-
 @bot.tree.command(name="shame", description="Highlights the biggest manager mistakes from the last completed gameweek.")
 async def shame(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -2653,30 +1553,34 @@ async def shame(interaction: discord.Interaction):
         return
 
     # --- Data Fetching ---
-    bootstrap_data, gw_data = await asyncio.gather(
+    bootstrap_data, gw_data, league_data = await asyncio.gather(
         fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/", cache_key="bootstrap"),
-        fetch_fpl_api(session, f"{BASE_API_URL}event/{completed_gw}/live/", cache_key=f"event_live_gw{completed_gw}", cache_gw=completed_gw)
+        fetch_fpl_api(session, f"{BASE_API_URL}event/{completed_gw}/live/", cache_key=f"event_live_gw{completed_gw}", cache_gw=completed_gw),
+        fetch_fpl_api(session, f"{BASE_API_URL}leagues-classic/{league_id}/standings/", cache_key=f"league_{league_id}_standings", cache_gw=completed_gw)
     )
-    if not bootstrap_data or not gw_data:
+    if not bootstrap_data or not gw_data or not league_data:
         await interaction.followup.send("Failed to fetch FPL data.")
         return
-        
+
     player_map = {p['id']: p for p in bootstrap_data['elements']}
     points_map = {p['id']: p['stats'] for p in gw_data['elements']}
-    
-    all_league_teams = await asyncio.to_thread(get_all_league_teams, interaction.guild_id, league_id)
-    if not all_league_teams:
+
+    # Get current league members from API (not stale database)
+    league_managers = league_data.get('standings', {}).get('results', [])
+    if not league_managers:
         await interaction.followup.send("No teams found for this league.")
         return
 
-    all_league_teams = all_league_teams[:25]
+    league_managers = league_managers[:25]
+
+    # Build a lookup for Discord user IDs from linked users
+    linked_users = await asyncio.to_thread(get_linked_users, interaction.guild_id, league_id)
+    discord_id_map = {user['fpl_team_id']: user['discord_user_id'] for user in linked_users}
         
     # --- Metric Calculation ---
-    manager_metrics = []
-    
-    async def get_manager_metrics(user):
-        fpl_id = user['fpl_team_id']
-        
+    async def get_manager_metrics(manager):
+        fpl_id = manager['entry']
+
         picks_data, transfers_data = await asyncio.gather(
             fetch_fpl_api(session, f"{BASE_API_URL}entry/{fpl_id}/event/{completed_gw}/picks/", cache_key=f"picks_entry_{fpl_id}", cache_gw=completed_gw),
             fetch_fpl_api(session, f"{BASE_API_URL}entry/{fpl_id}/transfers/", cache_key=f"transfers_entry_{fpl_id}", cache_gw=completed_gw)
@@ -2694,7 +1598,7 @@ async def shame(interaction: discord.Interaction):
         # 2. Captain Points
         captain_pick = next((p for p in picks_data['picks'] if p['is_captain']), None)
         vice_pick = next((p for p in picks_data['picks'] if p['is_vice_captain']), None)
-        
+
         effective_captain_id = None
         effective_captain_points = -1
 
@@ -2704,7 +1608,7 @@ async def shame(interaction: discord.Interaction):
                 effective_captain_id = vice_pick['element']
             else:
                 effective_captain_id = captain_pick['element']
-        
+
         if effective_captain_id:
             effective_captain_points = points_map.get(effective_captain_id, {}).get('total_points', 0)
 
@@ -2719,10 +1623,10 @@ async def shame(interaction: discord.Interaction):
                 if out_player_points > highest_transfer_out_points:
                     highest_transfer_out_points = out_player_points
                     highest_scoring_transfer_out_name = player_map.get(out_player_id, {}).get('web_name', 'Unknown')
-        
+
         return {
-            "discord_id": user['discord_user_id'],
-            "manager_name": user['manager_name'],
+            "discord_id": discord_id_map.get(fpl_id),
+            "manager_name": manager['player_name'],
             "bench_points": bench_points,
             "captain_id": effective_captain_id,
             "captain_points": effective_captain_points,
@@ -2730,7 +1634,7 @@ async def shame(interaction: discord.Interaction):
             "highest_scoring_transfer_out_name": highest_scoring_transfer_out_name
         }
 
-    tasks = [get_manager_metrics(user) for user in all_league_teams]
+    tasks = [get_manager_metrics(manager) for manager in league_managers]
     results = [res for res in await asyncio.gather(*tasks) if res is not None]
 
     if not results:
@@ -2772,7 +1676,6 @@ async def shame(interaction: discord.Interaction):
         embed.description = f"🎉 No manager mistakes found for GW {completed_gw}! Everyone is a winner."
 
     await interaction.followup.send(embed=embed)
-
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
