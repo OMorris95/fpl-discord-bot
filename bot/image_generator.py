@@ -195,9 +195,43 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         if player_pick['is_captain']:
             active_chip = fpl_data['picks'].get('active_chip')
             captain_text = "TC" if active_chip == '3xc' else "C"
-            draw.text((paste_x + 80, paste_y - 5), captain_text, font=captain_font, fill="black", stroke_width=2, stroke_fill="yellow")
+
+            # Create antialiased circle using supersampling
+            circle_size = 28
+            scale = 4
+            circle_img = Image.new("RGBA", (circle_size * scale, circle_size * scale), (0, 0, 0, 0))
+            circle_draw = ImageDraw.Draw(circle_img)
+            circle_draw.ellipse([0, 0, circle_size * scale - 1, circle_size * scale - 1], fill="white")
+            circle_img = circle_img.resize((circle_size, circle_size), Image.LANCZOS)
+
+            # Position and paste circle
+            circle_x = paste_x + 75
+            circle_y = paste_y - 5
+            background.paste(circle_img, (circle_x, circle_y), circle_img)
+
+            # Draw centered text (with stroke for bold effect, slight y adjustment for C)
+            text_x = circle_x + circle_size // 2
+            text_y = circle_y + circle_size // 2 - 1
+            draw.text((text_x, text_y), captain_text, font=captain_font, fill="black", anchor="mm", stroke_width=1, stroke_fill="black")
+
         elif player_pick['is_vice_captain']:
-            draw.text((paste_x + 80, paste_y - 5), "V", font=captain_font, fill="black", stroke_width=2, stroke_fill="white")
+            # Create antialiased circle using supersampling
+            circle_size = 28
+            scale = 4
+            circle_img = Image.new("RGBA", (circle_size * scale, circle_size * scale), (0, 0, 0, 0))
+            circle_draw = ImageDraw.Draw(circle_img)
+            circle_draw.ellipse([0, 0, circle_size * scale - 1, circle_size * scale - 1], fill="white")
+            circle_img = circle_img.resize((circle_size, circle_size), Image.LANCZOS)
+
+            # Position and paste circle
+            circle_x = paste_x + 75
+            circle_y = paste_y - 5
+            background.paste(circle_img, (circle_x, circle_y), circle_img)
+
+            # Draw centered text (with stroke for bold effect)
+            text_x = circle_x + circle_size // 2
+            text_y = circle_y + circle_size // 2
+            draw.text((text_x, text_y), "V", font=captain_font, fill="black", anchor="mm", stroke_width=1, stroke_fill="black")
 
     # Draw Header Info (Team Name, GW Points, Total Points)
     header_y = 20
