@@ -1153,7 +1153,8 @@ async def dreamteam(interaction: discord.Interaction):
         "formation": best_formation,
         "total_points": total_points,
         "gameweek": last_completed_gw,
-        "player_of_week": player_of_week
+        "player_of_week": player_of_week,
+        "league_name": league_data['league']['name']
     }
 
     fpl_data_for_image = {

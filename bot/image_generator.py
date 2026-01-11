@@ -6,8 +6,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 # --- File Paths ---
 BACKGROUND_IMAGE_PATH = "mobile-pitch-graphic.png"
-FONT_PATH = "font.ttf"
-JERSEYS_DIR = "team_jerseys_test"
+FONT_PATH = "Geist-Medium.otf"
+JERSEYS_DIR = "team_jerseys"
 JERSEY_SIZE = (94, 125)  # ~10% smaller than original 104x146, maintains aspect ratio
 
 # --- Layout & Styling ---
@@ -17,6 +17,13 @@ CAPTAIN_FONT_SIZE = 22
 SUMMARY_FONT_SIZE = 24
 POINTS_BOX_EXTRA_PADDING = 4
 PLAYER_BOX_WIDTH = 110  # Fixed width to fit "XXXXXXXX..." at font size 20
+
+# --- Shared Layout Settings ---
+NAME_BOX_Y_OFFSET = 66      # Offset from player Y to name box
+JERSEY_Y_OFFSET = 10        # Offset for jersey paste position
+NAME_TEXT_Y_OFFSET = -2     # Name text Y offset within box
+POINTS_BOX_COLOR = "#015030"  # Dark green
+NAME_BOX_COLOR = (0, 0, 0, 100)  # Semi-transparent black
 
 
 def format_player_price(player):
@@ -163,7 +170,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
             print(f"Jersey not found: {jersey_path}")
             continue
         x, y = coordinates[player_id]
-        paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2 + 10
+        paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2 + JERSEY_Y_OFFSET
 
         # Add visual indicators for subs
         if was_subbed_out:
@@ -177,19 +184,19 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
 
         name_text = player_name
         if len(name_text) > 9:
-            name_text = name_text[:7] + "..."
+            name_text = name_text[:8] + "..."
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
         box_width = PLAYER_BOX_WIDTH
         name_box_height = fixed_name_box_height + POINTS_BOX_EXTRA_PADDING
         name_box_x = x - box_width // 2
-        name_box_y = y + 66  # Adjusted for 131px tall jerseys
+        name_box_y = y + NAME_BOX_Y_OFFSET
         points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
-        draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
-        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill="#015030")
-        draw.text((x - name_bbox[2] / 2, name_box_y - 2), name_text, font=name_font, fill="white")
+        draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=NAME_BOX_COLOR)
+        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=POINTS_BOX_COLOR)
+        draw.text((x - name_bbox[2] / 2, name_box_y + NAME_TEXT_Y_OFFSET), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
         if player_pick['is_captain']:
@@ -201,26 +208,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
             scale = 4
             circle_img = Image.new("RGBA", (circle_size * scale, circle_size * scale), (0, 0, 0, 0))
             circle_draw = ImageDraw.Draw(circle_img)
-            circle_draw.ellipse([0, 0, circle_size * scale - 1, circle_size * scale - 1], fill="white")
-            circle_img = circle_img.resize((circle_size, circle_size), Image.LANCZOS)
-
-            # Position and paste circle
-            circle_x = paste_x + 75
-            circle_y = paste_y - 5
-            background.paste(circle_img, (circle_x, circle_y), circle_img)
-
-            # Draw centered text (with stroke for bold effect, slight y adjustment for C)
-            text_x = circle_x + circle_size // 2
-            text_y = circle_y + circle_size // 2 - 1
-            draw.text((text_x, text_y), captain_text, font=captain_font, fill="black", anchor="mm", stroke_width=1, stroke_fill="black")
-
-        elif player_pick['is_vice_captain']:
-            # Create antialiased circle using supersampling
-            circle_size = 28
-            scale = 4
-            circle_img = Image.new("RGBA", (circle_size * scale, circle_size * scale), (0, 0, 0, 0))
-            circle_draw = ImageDraw.Draw(circle_img)
-            circle_draw.ellipse([0, 0, circle_size * scale - 1, circle_size * scale - 1], fill="white")
+            circle_draw.ellipse([0, 0, circle_size * scale - 1, circle_size * scale - 1], fill="black")
             circle_img = circle_img.resize((circle_size, circle_size), Image.LANCZOS)
 
             # Position and paste circle
@@ -231,7 +219,26 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
             # Draw centered text (with stroke for bold effect)
             text_x = circle_x + circle_size // 2
             text_y = circle_y + circle_size // 2
-            draw.text((text_x, text_y), "V", font=captain_font, fill="black", anchor="mm", stroke_width=1, stroke_fill="black")
+            draw.text((text_x, text_y), captain_text, font=captain_font, fill="white", anchor="mm", stroke_width=1, stroke_fill="white")
+
+        elif player_pick['is_vice_captain']:
+            # Create antialiased circle using supersampling
+            circle_size = 28
+            scale = 4
+            circle_img = Image.new("RGBA", (circle_size * scale, circle_size * scale), (0, 0, 0, 0))
+            circle_draw = ImageDraw.Draw(circle_img)
+            circle_draw.ellipse([0, 0, circle_size * scale - 1, circle_size * scale - 1], fill="black")
+            circle_img = circle_img.resize((circle_size, circle_size), Image.LANCZOS)
+
+            # Position and paste circle
+            circle_x = paste_x + 75
+            circle_y = paste_y - 5
+            background.paste(circle_img, (circle_x, circle_y), circle_img)
+
+            # Draw centered text (with stroke for bold effect)
+            text_x = circle_x + circle_size // 2
+            text_y = circle_y + circle_size // 2 + 1
+            draw.text((text_x, text_y), "V", font=captain_font, fill="white", anchor="mm", stroke_width=1, stroke_fill="white")
 
     # Draw Header Info (Team Name, GW Points, Total Points)
     header_y = 20
@@ -316,55 +323,62 @@ def generate_dreamteam_image(fpl_data, summary_data):
             print(f"Jersey not found: {jersey_path}")
             continue
         x, y = coordinates[player_id]
-        paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
+        paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2 + JERSEY_Y_OFFSET
         background.paste(asset_img, (paste_x, paste_y), asset_img)
 
         name_text = player_name
         if len(name_text) > 9:
-            name_text = name_text[:7] + "..."
+            name_text = name_text[:8] + "..."
         points_text = f"{display_points} pts"
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
         box_width = PLAYER_BOX_WIDTH
         name_box_height = fixed_name_box_height + POINTS_BOX_EXTRA_PADDING
         name_box_x = x - box_width // 2
-        name_box_y = y + 66  # Adjusted for 131px tall jerseys
+        name_box_y = y + NAME_BOX_Y_OFFSET
         points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
-        draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=(0, 0, 0, 100))
-        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=(0, 135, 81, 150))
-        draw.text((x - name_bbox[2] / 2, name_box_y - 4), name_text, font=name_font, fill="white")
+        draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=NAME_BOX_COLOR)
+        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=POINTS_BOX_COLOR)
+        draw.text((x - name_bbox[2] / 2, name_box_y + NAME_TEXT_Y_OFFSET), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
     # Draw Header Info for Dream Team
     header_y = 20
     left_margin = 20
 
-    team_font = ImageFont.truetype(FONT_PATH, 32)
-    draw.text((left_margin, header_y), "Dream Team", font=team_font, fill="black")
+    # League Name (truncate if >= 20 chars)
+    league_name = summary_data.get('league_name', 'Dream Team')
+    if len(league_name) >= 20:
+        league_name = league_name[:18] + "..."
+    team_font = ImageFont.truetype(FONT_PATH, 28)
+    draw.text((left_margin - 10, header_y - 6), league_name, font=team_font, fill="white")
 
-    dream_bbox = draw.textbbox((0, 0), "Dream Team", font=team_font)
-    dream_width = dream_bbox[2] - dream_bbox[0]
-    points_x = left_margin + dream_width + 30
+    # Position points info from right side of canvas
+    right_margin = 20
+    gw = summary_data.get('gameweek', '')
+    dream_text = f"Dream Team GW{gw}"
+    gw_points_text = f"GW PTS: {summary_data['total_points']}"
+    dream_bbox = draw.textbbox((0, 0), dream_text, font=summary_font)
+    gw_bbox = draw.textbbox((0, 0), gw_points_text, font=summary_font)
+    max_text_width = max(dream_bbox[2], gw_bbox[2])
+    points_x = background.width - max_text_width - right_margin
 
-    gw_text = f"Gameweek {summary_data['gameweek']}"
-    draw.text((points_x, header_y + 4), gw_text, font=summary_font, fill="black")
+    draw.text((points_x, header_y - 14), dream_text, font=summary_font, fill="white")
+    draw.text((points_x, header_y + 12), gw_points_text, font=summary_font, fill="white")
 
-    total_text = f"Total PTS: {summary_data['total_points']}"
-    draw.text((points_x, header_y + 30), total_text, font=summary_font, fill="black")
-
-    # Draw Player of the Week section
+    # Draw Player of the Week section (centered at bottom)
     potw_data = summary_data['player_of_week']
     potw_player_info = potw_data['player_info']
     potw_name = potw_player_info['web_name']
     potw_points = potw_data['points']
 
-    # Player of the Week positioning (Top Left)
-    potw_x = 20
-    potw_y = 20
+    # POTW positioning (bottom center area)
+    potw_y = int(height * 0.89) - 10
+    potw_font_large = ImageFont.truetype(FONT_PATH, 28)  # Same size as league name
 
-    # Load jersey for POTW
+    # Load jersey for POTW (full size like pitch players)
     team_id = potw_player_info['team']
     team_name = all_teams[team_id]['name']
     is_goalkeeper = potw_player_info['element_type'] == 1
@@ -374,40 +388,34 @@ def generate_dreamteam_image(fpl_data, summary_data):
     potw_img = None
     try:
         potw_img = Image.open(jersey_path).convert("RGBA")
-        # Scale down for POTW box (maintain aspect ratio: 104x146 -> 52x73)
-        potw_img = potw_img.resize((52, 73), Image.LANCZOS)
+        target_height = JERSEY_SIZE[1]
+        scale = target_height / potw_img.height
+        new_width = int(potw_img.width * scale)
+        potw_img = potw_img.resize((new_width, target_height), Image.LANCZOS)
     except FileNotFoundError:
         pass
 
-    # Draw POTW background box
-    potw_box_width = 220  # Made wider to fit "Player of the Week" text
-    potw_box_height = 110
-    potw_box = [potw_x, potw_y, potw_x + potw_box_width, potw_y + potw_box_height]
-    draw.rounded_rectangle(potw_box, radius=14, fill="#ffd700")
-
-    # Draw "Player of the Week" title
+    # Calculate text width for centering the whole section
     title_text = "Player of the Week"
-    title_bbox = draw.textbbox((0, 0), title_text, font=potw_font)
-    title_x = potw_x + (potw_box_width - title_bbox[2]) // 2
-    draw.text((title_x, potw_y + 5), title_text, font=potw_font, fill="black")
+    title_bbox = draw.textbbox((0, 0), title_text, font=potw_font_large)
+    text_width = title_bbox[2]
+    jersey_width = potw_img.width if potw_img else 0
+    total_width = text_width + 20 + jersey_width  # 20px gap between text and jersey
 
-    # Draw player image if available
+    # Center the whole section
+    start_x = (width - total_width) // 2
+
+    # Draw text (left-aligned within centered section)
+    draw.text((start_x, potw_y), title_text, font=potw_font_large, fill="white")
+    draw.text((start_x, potw_y + 30), potw_name, font=potw_font_large, fill="white")
+    draw.text((start_x, potw_y + 60), f"{potw_points} pts", font=potw_font_large, fill="white")
+    draw.text((start_x, potw_y + 90), f"G: {potw_data['goals']} A: {potw_data['assists']}", font=potw_font_large, fill="white")
+
+    # Draw jersey to the right of text
     if potw_img:
-        img_x = potw_x + 15
-        img_y = potw_y + 30
-        background.paste(potw_img, (img_x, img_y), potw_img)
-
-        # Draw name and points beside the image
-        name_x = img_x + potw_img.width + 15
-        draw.text((name_x, img_y), potw_name, font=potw_font, fill="black")
-        draw.text((name_x, img_y + 25), f"{potw_points} pts", font=potw_font, fill="black")
-        draw.text((name_x, img_y + 50), f"G: {potw_data['goals']} A: {potw_data['assists']}", font=potw_font, fill="black")
-    else:
-        # Draw text only if no image
-        name_x = potw_x + 15
-        draw.text((name_x, potw_y + 35), potw_name, font=potw_font, fill="black")
-        draw.text((name_x, potw_y + 55), f"{potw_points} pts", font=potw_font, fill="black")
-        draw.text((name_x, potw_y + 75), f"Goals: {potw_data['goals']}, Assists: {potw_data['assists']}", font=potw_font, fill="black")
+        jersey_x = start_x + text_width + 20
+        jersey_y = potw_y + 5
+        background.paste(potw_img, (jersey_x, jersey_y), potw_img)
 
     img_byte_arr = io.BytesIO()
     background.convert("RGB").save(img_byte_arr, format='PNG')
