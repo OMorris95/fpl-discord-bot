@@ -176,8 +176,8 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         background.paste(asset_img, (paste_x, paste_y), asset_img)
 
         name_text = player_name
-        if len(name_text) > 10:
-            name_text = name_text[:8] + "..."
+        if len(name_text) > 9:
+            name_text = name_text[:7] + "..."
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
         box_width = PLAYER_BOX_WIDTH
@@ -208,17 +208,19 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
     team_font = ImageFont.truetype(FONT_PATH, 28)
     draw.text((left_margin - 10, header_y - 6), team_name_text, font=team_font, fill="white")
 
-    # Calculate offset for points info (beside team name)
-    team_bbox = draw.textbbox((0, 0), team_name_text, font=team_font)
-    team_width = team_bbox[2] - team_bbox[0]
-    points_x = left_margin + team_width + 30
+    # Position points info from right side of canvas
+    right_margin = 20
+    gw_text = f"GW{fpl_data['live'].get('gw', '')} PTS: {summary_data['gw_points']}"
+    total_text = f"Total PTS: {summary_data['total_points']}"
+    gw_bbox = draw.textbbox((0, 0), gw_text, font=summary_font)
+    total_bbox = draw.textbbox((0, 0), total_text, font=summary_font)
+    max_text_width = max(gw_bbox[2], total_bbox[2])
+    points_x = background.width - max_text_width - right_margin
 
     # GW Points
-    gw_text = f"GW{fpl_data['live'].get('gw', '')} PTS: {summary_data['gw_points']}"
     draw.text((points_x, header_y - 14), gw_text, font=summary_font, fill="white")
 
     # Total Points (below GW points)
-    total_text = f"Total PTS: {summary_data['total_points']}"
     draw.text((points_x, header_y + 12), total_text, font=summary_font, fill="white")
 
     img_byte_arr = io.BytesIO()
@@ -284,8 +286,8 @@ def generate_dreamteam_image(fpl_data, summary_data):
         background.paste(asset_img, (paste_x, paste_y), asset_img)
 
         name_text = player_name
-        if len(name_text) > 10:
-            name_text = name_text[:8] + "..."
+        if len(name_text) > 9:
+            name_text = name_text[:7] + "..."
         points_text = f"{display_points} pts"
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
