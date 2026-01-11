@@ -11,11 +11,12 @@ JERSEYS_DIR = "team_jerseys_test"
 JERSEY_SIZE = (94, 131)  # ~10% smaller than original 104x146, maintains aspect ratio
 
 # --- Layout & Styling ---
-NAME_FONT_SIZE = 20
+NAME_FONT_SIZE = 18
 POINTS_FONT_SIZE = 18
 CAPTAIN_FONT_SIZE = 22
 SUMMARY_FONT_SIZE = 24
 POINTS_BOX_EXTRA_PADDING = 4
+PLAYER_BOX_WIDTH = 110  # Fixed width to fit "XXXXXXXX..." at font size 20
 
 
 def format_player_price(player):
@@ -179,8 +180,8 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
             name_text = name_text[:8] + "..."
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
-        box_width = max(name_bbox[2], points_bbox[2]) + 10
-        name_box_height = fixed_name_box_height
+        box_width = PLAYER_BOX_WIDTH
+        name_box_height = fixed_name_box_height + POINTS_BOX_EXTRA_PADDING
         name_box_x = x - box_width // 2
         name_box_y = y + 66  # Adjusted for 131px tall jerseys
         points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
@@ -288,8 +289,8 @@ def generate_dreamteam_image(fpl_data, summary_data):
         points_text = f"{display_points} pts"
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
-        box_width = max(name_bbox[2], points_bbox[2]) + 10
-        name_box_height = fixed_name_box_height
+        box_width = PLAYER_BOX_WIDTH
+        name_box_height = fixed_name_box_height + POINTS_BOX_EXTRA_PADDING
         name_box_x = x - box_width // 2
         name_box_y = y + 66  # Adjusted for 131px tall jerseys
         points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
