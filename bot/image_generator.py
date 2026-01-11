@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # --- File Paths ---
 BACKGROUND_IMAGE_PATH = "mobile-pitch-graphic.png"
+DREAMTEAM_BACKGROUND_PATH = "dream-pitch-graphic.png"
 FONT_PATH = "Geist-Medium.otf"
 JERSEYS_DIR = "team_jerseys"
 JERSEY_SIZE = (94, 125)  # ~10% smaller than original 104x146, maintains aspect ratio
@@ -21,9 +22,9 @@ PLAYER_BOX_WIDTH = 110  # Fixed width to fit "XXXXXXXX..." at font size 20
 # --- Shared Layout Settings ---
 NAME_BOX_Y_OFFSET = 66      # Offset from player Y to name box
 JERSEY_Y_OFFSET = 10        # Offset for jersey paste position
-NAME_TEXT_Y_OFFSET = -2     # Name text Y offset within box
-POINTS_BOX_COLOR = "#015030"  # Dark green
-NAME_BOX_COLOR = (0, 0, 0, 100)  # Semi-transparent black
+NAME_TEXT_Y_OFFSET = -1     # Name text Y offset within box
+POINTS_BOX_COLOR = "#2E0F68"  # Purple
+NAME_BOX_COLOR = (0, 0, 0, 100)  # Black
 
 
 def format_player_price(player):
@@ -273,7 +274,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
 def generate_dreamteam_image(fpl_data, summary_data):
     """Generate dream team image with Player of the Week graphic."""
     try:
-        pitch = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
+        pitch = Image.open(DREAMTEAM_BACKGROUND_PATH).convert("RGBA")
         base_layer = Image.new("RGBA", pitch.size, "#1A1A1E")
         background = Image.alpha_composite(base_layer, pitch)
         draw = ImageDraw.Draw(background)
@@ -374,9 +375,9 @@ def generate_dreamteam_image(fpl_data, summary_data):
     potw_name = potw_player_info['web_name']
     potw_points = potw_data['points']
 
-    # POTW positioning (bottom center area)
-    potw_y = int(height * 0.89) - 10
-    potw_font_large = ImageFont.truetype(FONT_PATH, 28)  # Same size as league name
+    # POTW fonts
+    potw_title_font = ImageFont.truetype(FONT_PATH, 36)  # Larger title
+    potw_details_font = ImageFont.truetype(FONT_PATH, 28)  # Smaller details
 
     # Load jersey for POTW (full size like pitch players)
     team_id = potw_player_info['team']
@@ -395,26 +396,36 @@ def generate_dreamteam_image(fpl_data, summary_data):
     except FileNotFoundError:
         pass
 
-    # Calculate text width for centering the whole section
+    # Draw "Player of the Week" title - centered horizontally, higher up
     title_text = "Player of the Week"
-    title_bbox = draw.textbbox((0, 0), title_text, font=potw_font_large)
-    text_width = title_bbox[2]
-    jersey_width = potw_img.width if potw_img else 0
-    total_width = text_width + 20 + jersey_width  # 20px gap between text and jersey
+    title_bbox = draw.textbbox((0, 0), title_text, font=potw_title_font)
+    title_width = title_bbox[2]
+    title_x = (width - title_width) // 2
+    title_y = int(height * 0.85) - 15  # Adjust this to move title up/down
+    draw.text((title_x, title_y), title_text, font=potw_title_font, fill="black")
 
-    # Center the whole section
+    # Calculate positioning for details section (name, pts, stats + jersey)
+    details_y = title_y + 70  # Adjust this to move details up/down (was 40, now 50 = 10px lower)
+    jersey_width = potw_img.width if potw_img else 0
+
+    # Get max width of detail texts
+    name_bbox = draw.textbbox((0, 0), potw_name, font=potw_details_font)
+    pts_bbox = draw.textbbox((0, 0), f"{potw_points} pts", font=potw_details_font)
+    stats_bbox = draw.textbbox((0, 0), f"G: {potw_data['goals']} A: {potw_data['assists']}", font=potw_details_font)
+    max_text_width = max(name_bbox[2], pts_bbox[2], stats_bbox[2])
+
+    total_width = max_text_width + 20 + jersey_width
     start_x = (width - total_width) // 2
 
-    # Draw text (left-aligned within centered section)
-    draw.text((start_x, potw_y), title_text, font=potw_font_large, fill="white")
-    draw.text((start_x, potw_y + 30), potw_name, font=potw_font_large, fill="white")
-    draw.text((start_x, potw_y + 60), f"{potw_points} pts", font=potw_font_large, fill="white")
-    draw.text((start_x, potw_y + 90), f"G: {potw_data['goals']} A: {potw_data['assists']}", font=potw_font_large, fill="white")
+    # Draw player details (left-aligned within centered section)
+    draw.text((start_x, details_y), potw_name, font=potw_details_font, fill="black")
+    draw.text((start_x, details_y + 28), f"{potw_points} pts", font=potw_details_font, fill="black")
+    draw.text((start_x, details_y + 56), f"G: {potw_data['goals']} A: {potw_data['assists']}", font=potw_details_font, fill="black")
 
     # Draw jersey to the right of text
     if potw_img:
-        jersey_x = start_x + text_width + 20
-        jersey_y = potw_y + 5
+        jersey_x = start_x + max_text_width + 20
+        jersey_y = details_y - 10  # Adjust this to move jersey up/down
         background.paste(potw_img, (jersey_x, jersey_y), potw_img)
 
     img_byte_arr = io.BytesIO()
