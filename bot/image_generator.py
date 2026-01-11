@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 BACKGROUND_IMAGE_PATH = "mobile-pitch-graphic.png"
 FONT_PATH = "font.ttf"
 JERSEYS_DIR = "team_jerseys_test"
-JERSEY_SIZE = (94, 131)  # ~10% smaller than original 104x146, maintains aspect ratio
+JERSEY_SIZE = (94, 125)  # ~10% smaller than original 104x146, maintains aspect ratio
 
 # --- Layout & Styling ---
 NAME_FONT_SIZE = 18
@@ -163,7 +163,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
             print(f"Jersey not found: {jersey_path}")
             continue
         x, y = coordinates[player_id]
-        paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2
+        paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2 + 10
 
         # Add visual indicators for subs
         if was_subbed_out:
