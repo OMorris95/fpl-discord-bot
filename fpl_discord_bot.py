@@ -4,9 +4,14 @@ from discord.ext import commands, tasks
 import aiohttp
 import os
 import json
+import time
 from pathlib import Path
 import asyncio
 from dotenv import load_dotenv
+
+from bot.logging_config import get_logger
+
+logger = get_logger('bot')
 
 # Import from bot modules
 from bot.database import (
@@ -19,6 +24,7 @@ from bot.database import (
 )
 from bot.api import (
     fetch_fpl_api, get_current_gameweek, get_last_completed_gameweek,
+    get_bootstrap_data, get_gameweek_info, get_live_data, get_league_data,
     get_league_managers, get_live_manager_details, get_manager_transfer_activity,
     get_league_picks_cached, get_league_history_cached, cleanup_old_caches,
     set_api_semaphore, BASE_API_URL, CACHE_DIR,
@@ -84,6 +90,10 @@ def get_league_id_for_context(interaction: discord.Interaction):
 
 class FPLBot(commands.Bot):
     """A Discord bot for displaying FPL league and team information."""
+
+    # Autocomplete cache settings
+    AUTOCOMPLETE_CACHE_TTL = 300  # 5 minutes
+
     def __init__(self):
         intents = discord.Intents.default()
         intents.presences = True
@@ -91,9 +101,30 @@ class FPLBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.session = None
         self.last_known_goals = {}
-        self.picks_cache = {} # Cache for manager picks
-        self.transfers_cache = {} # Cache for manager transfers
-        self.live_fpl_data = None # In-memory cache for live GW data
+        self.picks_cache = {}  # Cache for manager picks
+        self.transfers_cache = {}  # Cache for manager transfers
+        self.live_fpl_data = None  # In-memory cache for live GW data
+        # In-memory autocomplete cache to avoid excessive API calls
+        self._autocomplete_cache = None
+        self._autocomplete_cache_time = 0
+
+    async def get_autocomplete_bootstrap(self):
+        """Get bootstrap data for autocomplete with in-memory caching."""
+        now = time.time()
+        if self._autocomplete_cache and (now - self._autocomplete_cache_time) < self.AUTOCOMPLETE_CACHE_TTL:
+            return self._autocomplete_cache
+
+        # Cache miss or expired - fetch new data
+        data = await fetch_fpl_api(
+            self.session,
+            f"{BASE_API_URL}bootstrap-static/",
+            cache_key="bootstrap"
+        )
+        if data:
+            self._autocomplete_cache = data
+            self._autocomplete_cache_time = now
+            logger.debug("Autocomplete cache refreshed")
+        return data
 
     async def setup_hook(self):
         init_database()
@@ -103,7 +134,7 @@ class FPLBot(commands.Bot):
         self.live_data_loop.start()
         self.goal_check_loop.start()
         await self.tree.sync()
-        print(f"Synced slash commands for {self.user}.")
+        logger.info(f"Synced slash commands for {self.user}.")
 
     @tasks.loop(seconds=60)
     async def live_data_loop(self):
@@ -120,7 +151,7 @@ class FPLBot(commands.Bot):
 
             if not current_event:
                 if self.live_fpl_data is not None:
-                    print("No current gameweek found. Clearing live data cache.")
+                    logger.debug("No current gameweek found. Clearing live data cache.")
                     self.live_fpl_data = None
                 return
 
@@ -138,7 +169,7 @@ class FPLBot(commands.Bot):
 
             if not live_fixtures:
                 if self.live_fpl_data is not None:
-                    print("No live fixtures. Clearing live data cache.")
+                    logger.debug("No live fixtures. Clearing live data cache.")
                     self.live_fpl_data = None
                 return
 
@@ -149,11 +180,11 @@ class FPLBot(commands.Bot):
                 live_data['fixtures'] = fixtures  # Include fixtures for goal detection
                 live_data['is_finished'] = current_event.get('finished', False)
                 self.live_fpl_data = live_data
-                print(f"Live data updated for GW {current_gw}. {len(live_fixtures)} fixture(s) in progress.")
+                logger.debug(f"Live data updated for GW {current_gw}. {len(live_fixtures)} fixture(s) in progress.")
             else:
                 self.live_fpl_data = None
         except Exception as e:
-            print(f"Error in live_data_loop: {e}")
+            logger.error(f"Error in live_data_loop: {e}", exc_info=True)
             self.live_fpl_data = None
 
     @tasks.loop(seconds=60)
@@ -170,7 +201,7 @@ class FPLBot(commands.Bot):
             return
 
         if self.last_known_goals.get("gw") != current_gw:
-            print(f"Initializing goal cache for GW {current_gw}.")
+            logger.info(f"Initializing goal cache for GW {current_gw}.")
             self.last_known_goals = {"gw": current_gw}
             for player_stats in live_data.get('elements', []):
                 self.last_known_goals[player_stats['id']] = player_stats['stats']['goals_scored']
@@ -273,11 +304,55 @@ class FPLBot(commands.Bot):
         await super().close()
 
     async def on_ready(self):
-        print(f"Logged in as {self.user} (ID: {self.user.id})")
+        logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
         await bot.change_presence(status=discord.Status.online, activity=discord.Game(name="Fantasy Premier League"))
-        print("Bot is ready and online.")
+        logger.info("Bot is ready and online.")
 
 bot = FPLBot()
+
+
+# --- GLOBAL ERROR HANDLER ---
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Global error handler for all slash commands."""
+
+    # Handle already-responded interactions
+    async def send_error(message: str, ephemeral: bool = True):
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=ephemeral)
+            else:
+                await interaction.response.send_message(message, ephemeral=ephemeral)
+        except discord.HTTPException:
+            logger.warning(f"Failed to send error message to user: {message}")
+
+    if isinstance(error, app_commands.MissingPermissions):
+        missing = ", ".join(error.missing_permissions)
+        await send_error(f"You need the following permission(s) to use this command: `{missing}`")
+
+    elif isinstance(error, app_commands.CommandOnCooldown):
+        await send_error(f"This command is on cooldown. Try again in {error.retry_after:.1f} seconds.")
+
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        missing = ", ".join(error.missing_permissions)
+        await send_error(f"I need the following permission(s) to run this command: `{missing}`")
+
+    elif isinstance(error, app_commands.NoPrivateMessage):
+        await send_error("This command can only be used in a server, not in DMs.")
+
+    elif isinstance(error, app_commands.CheckFailure):
+        await send_error("You don't have permission to use this command.")
+
+    else:
+        # Log unexpected errors with full traceback
+        command_name = interaction.command.name if interaction.command else "Unknown"
+        logger.error(
+            f"Unhandled error in command '{command_name}' "
+            f"(User: {interaction.user}, Guild: {interaction.guild_id})",
+            exc_info=error
+        )
+        await send_error("An unexpected error occurred. Please try again later.")
+
 
 # --- DISCORD SLASH COMMANDS ---
 
@@ -300,14 +375,6 @@ async def toggle_goals(interaction: discord.Interaction):
         await asyncio.to_thread(add_goal_subscription, channel_id, league_id)
         await interaction.followup.send("🟢 Live goal alerts enabled. I will post goals as they happen.")
 
-@toggle_goals.error
-async def toggle_goals_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("You need the `Manage Channels` permission to use this command.", ephemeral=True)
-    else:
-        await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
-        raise error
-
 @bot.tree.command(name="toggle_transfer_alerts", description="Enable or disable transfer flop alerts in this channel.")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def toggle_transfer_alerts(interaction: discord.Interaction):
@@ -327,14 +394,6 @@ async def toggle_transfer_alerts(interaction: discord.Interaction):
     else:
         await asyncio.to_thread(set_transfer_alert_subscription, interaction.channel_id, True)
         await interaction.followup.send("🟢 Transfer flop alerts enabled for this channel.")
-
-@toggle_transfer_alerts.error
-async def toggle_transfer_alerts_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("You need the `Manage Channels` permission to use this command.", ephemeral=True)
-    else:
-        await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
-        raise error
 
 @bot.tree.command(name="setleague", description="Configure which FPL league this server or channel uses.")
 @app_commands.describe(league_id="The FPL league ID (numbers only).",
@@ -452,124 +511,64 @@ async def setadminchannel(interaction: discord.Interaction, channel: discord.Tex
     save_league_config()
     await interaction.followup.send(f"Admin channel has been set to {channel.mention}.")
 
-@setadminchannel.error
-
-async def setadminchannel_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-
-    if isinstance(error, app_commands.MissingPermissions):
-
-        await interaction.response.send_message("You need the `Manage Server` permission to use this command.", ephemeral=True)
-
-    else:
-
-        await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
-
-        raise error
-
 @bot.tree.command(name="claim", description="Claim your FPL team to link it to your Discord account for this server.")
-
 @app_commands.describe(team="The FPL team you want to claim.")
-
 async def claim(interaction: discord.Interaction, team: str):
-
+    """Claim an FPL team and link it to your Discord account for this server."""
     await interaction.response.defer(ephemeral=True)
 
     if not interaction.guild_id:
-
         await interaction.followup.send("This command can only be used in a server.", ephemeral=True)
-
         return
-
-    
 
     try:
-
         fpl_team_id = int(team)
-
     except ValueError:
-
         await interaction.followup.send("Invalid team selection. Please choose a team from the autocomplete list.", ephemeral=True)
-
         return
 
-        
-
     user_id = interaction.user.id
-
     guild_id = interaction.guild_id
 
     # Check if team is in the configured league
-
     team_data = await asyncio.to_thread(get_team_by_fpl_id, fpl_team_id)
-
     if not team_data:
-
         await interaction.followup.send("That team could not be found. It might not be in the configured league.", ephemeral=True)
-
         return
 
-    # Check if team is already claimed IN THIS GUILD
-
+    # Check if team is already claimed in this guild
     current_owner_id = await asyncio.to_thread(get_linked_user_for_team, guild_id, fpl_team_id)
 
-    
-
     if current_owner_id is None:
-
         # Team is unclaimed in this guild, link it
-
         await asyncio.to_thread(link_user_to_team, guild_id, user_id, fpl_team_id)
-
         await interaction.followup.send(f"✅ Success! You have been linked to **{team_data['team_name']}** for this server.", ephemeral=True)
-
     else:
-
         # Team is claimed by someone else, send for admin approval
-
         if int(current_owner_id) == user_id:
-
             await interaction.followup.send(f"You have already claimed **{team_data['team_name']}** in this server.", ephemeral=True)
-
             return
 
         admin_channel_id = league_config.get("admin_channels", {}).get(str(interaction.guild_id))
-
         if not admin_channel_id:
-
             await interaction.followup.send("⚠️ That team is already linked to another user, but no admin channel is configured for this server to handle the conflict.", ephemeral=True)
-
             return
 
         admin_channel = bot.get_channel(int(admin_channel_id))
-
         if not admin_channel:
-
             await interaction.followup.send("⚠️ The configured admin channel could not be found.", ephemeral=True)
-
             return
 
-        
-
         embed = discord.Embed(
-
             title="🚨 Claim Conflict",
-
             description=f"<@{user_id}> wants to claim **{team_data['team_name']}**.",
-
             color=discord.Color.orange()
-
         )
-
         embed.add_field(name="Currently Owned By", value=f"<@{current_owner_id}>", inline=False)
-
         embed.add_field(name="FPL Team ID", value=str(fpl_team_id), inline=False)
 
         view = AdminApprovalView(fpl_team_id, user_id, guild_id)
-
         await admin_channel.send(embed=embed, view=view)
-
-        
-
         await interaction.followup.send("⚠️ That team is already linked to another user. An admin approval request has been sent.", ephemeral=True)
 
 @claim.autocomplete('team')
@@ -622,14 +621,6 @@ async def assign_autocomplete(interaction: discord.Interaction, current: str):
         for fpl_team_id, team_name, manager_name in all_teams
     ]
     return choices
-
-@assign.error
-async def assign_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("You need the `Manage Server` permission to use this command.", ephemeral=True)
-    else:
-        await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
-        raise error
 
 @bot.tree.command(name="team", description="Generates an image of a manager's current FPL team.")
 @app_commands.describe(manager="Select the manager's team to view. Leave blank to view your own.")
@@ -825,7 +816,7 @@ async def table(interaction: discord.Interaction):
 
     # --- Process and Display ---
     live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
-    all_players_map = {p['id']: p for p in bootstrap_data['elements']}
+    all_players_map = {p['id']: p for p in bootstrap_data.get('elements', [])}
 
     tasks = [
         get_live_manager_details(
@@ -920,7 +911,7 @@ async def player(interaction: discord.Interaction, player: str):
         await interaction.followup.send("Failed to fetch FPL data. Please try again later.")
         return
 
-    all_players = {p['id']: p for p in bootstrap_data['elements']}
+    all_players = {p['id']: p for p in bootstrap_data.get('elements', [])}
     selected_player = all_players.get(player_id)
 
     if not selected_player:
@@ -968,25 +959,22 @@ async def player(interaction: discord.Interaction, player: str):
 
 @player.autocomplete('player')
 async def player_autocomplete(interaction: discord.Interaction, current: str):
-    session = bot.session
-    bootstrap_data = await fetch_fpl_api(
-        session,
-        f"{BASE_API_URL}bootstrap-static/",
-        cache_key="bootstrap_autocomplete"
-    )
+    # Use in-memory cached bootstrap data for performance
+    bootstrap_data = await bot.get_autocomplete_bootstrap()
     if not bootstrap_data:
         return []
-    
-    all_players = bootstrap_data['elements']
+
+    all_players = bootstrap_data.get('elements', [])
     choices = []
-    
+    current_lower = current.lower()
+
     for player in all_players:
         full_name = f"{player['first_name']} {player['second_name']}"
         web_name = player['web_name']
-        if current.lower() in full_name.lower() or current.lower() in web_name.lower():
+        if current_lower in full_name.lower() or current_lower in web_name.lower():
             display_name = f"{full_name} ({web_name})"
             choices.append(app_commands.Choice(name=display_name, value=str(player['id'])))
-    
+
     return sorted(choices, key=lambda x: x.name)[:25]
 
 def find_optimal_dreamteam(all_squad_players):
@@ -1098,7 +1086,7 @@ async def dreamteam(interaction: discord.Interaction):
         await interaction.followup.send("Failed to fetch FPL data. Please try again later.")
         return
 
-    all_players = {p['id']: p for p in bootstrap_data['elements']}
+    all_players = {p['id']: p for p in bootstrap_data.get('elements', [])}
     completed_gw_stats = {p['id']: p['stats'] for p in completed_gw_data['elements']}
 
     # Use cached league picks (is_finished=True for permanent cache)
@@ -1201,7 +1189,7 @@ async def transfers(interaction: discord.Interaction):
         await interaction.followup.send("Failed to fetch FPL league data. Please try again later.")
         return
 
-    player_lookup = {p['id']: p for p in bootstrap_data['elements']}
+    player_lookup = {p['id']: p for p in bootstrap_data.get('elements', [])}
     managers = league_data['standings']['results']
 
     tasks = [
@@ -1308,7 +1296,7 @@ async def captains(interaction: discord.Interaction):
         await interaction.followup.send("Failed to fetch FPL data. Please try again later.")
         return
 
-    all_players = {p['id']: p for p in bootstrap_data['elements']}
+    all_players = {p['id']: p for p in bootstrap_data.get('elements', [])}
 
     # Use cached league picks
     all_picks = await get_league_picks_cached(
@@ -1371,7 +1359,7 @@ async def fixtures(interaction: discord.Interaction, team: str = None):
         await interaction.followup.send("Failed to fetch FPL data. Please try again later.")
         return
 
-    teams_map = {t['id']: t for t in bootstrap_data['teams']}
+    teams_map = {t['id']: t for t in bootstrap_data.get('teams', [])}
     
     embed = discord.Embed(title="Upcoming Fixtures", color=discord.Color.blue())
 
@@ -1446,23 +1434,20 @@ async def fixtures(interaction: discord.Interaction, team: str = None):
 
 @fixtures.autocomplete('team')
 async def fixtures_autocomplete(interaction: discord.Interaction, current: str):
-    session = bot.session
-    bootstrap_data = await fetch_fpl_api(
-        session,
-        f"{BASE_API_URL}bootstrap-static/",
-        cache_key="bootstrap_autocomplete"
-    )
+    # Use in-memory cached bootstrap data for performance
+    bootstrap_data = await bot.get_autocomplete_bootstrap()
     if not bootstrap_data:
         return []
-    
-    all_teams = bootstrap_data['teams']
+
+    all_teams = bootstrap_data.get('teams', [])
     choices = []
-    
+    current_lower = current.lower()
+
     for team in all_teams:
         team_name = team['name']
-        if current.lower() in team_name.lower():
+        if current_lower in team_name.lower():
             choices.append(app_commands.Choice(name=team_name, value=str(team['id'])))
-    
+
     return sorted(choices, key=lambda x: x.name)[:25]
 
 @bot.tree.command(name="h2h", description="Compare two FPL teams for the current gameweek.")
@@ -1527,7 +1512,7 @@ async def h2h(interaction: discord.Interaction, manager_a: str, manager_b: str):
     if not bootstrap_data:
         await interaction.followup.send("Could not fetch player data.")
         return
-    player_map = {p['id']: p['web_name'] for p in bootstrap_data['elements']}
+    player_map = {p['id']: p['web_name'] for p in bootstrap_data.get('elements', [])}
 
     def get_player_names(ids):
         return [player_map.get(p_id, "Unknown") for p_id in ids]
@@ -1570,7 +1555,7 @@ async def shame(interaction: discord.Interaction):
         await interaction.followup.send("Failed to fetch FPL data.")
         return
 
-    player_map = {p['id']: p for p in bootstrap_data['elements']}
+    player_map = {p['id']: p for p in bootstrap_data.get('elements', [])}
     points_map = {p['id']: p['stats'] for p in gw_data['elements']}
 
     # Get current league members from API (not stale database)
@@ -1698,6 +1683,6 @@ async def shame(interaction: discord.Interaction):
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
-        print("!!! ERROR: DISCORD_BOT_TOKEN not found in .env file. Please create a .env file with your bot token.")
+        logger.critical("DISCORD_BOT_TOKEN not found in .env file. Please create a .env file with your bot token.")
     else:
         bot.run(DISCORD_BOT_TOKEN)

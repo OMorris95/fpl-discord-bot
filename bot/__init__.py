@@ -1,4 +1,6 @@
 # Bot module exports
+from .logging_config import get_logger, logger
+
 from .database import (
     init_database,
     upsert_league_teams,
@@ -23,6 +25,10 @@ from .api import (
     fetch_fpl_api,
     get_current_gameweek,
     get_last_completed_gameweek,
+    get_bootstrap_data,
+    get_gameweek_info,
+    get_live_data,
+    get_league_data,
     get_league_managers,
     get_live_manager_details,
     get_manager_transfer_activity,
@@ -44,6 +50,7 @@ from .image_generator import (
     build_manager_url,
     format_manager_link,
     get_jersey_filename,
+    load_jersey_image,
     calculate_player_coordinates,
     generate_team_image,
     generate_dreamteam_image,

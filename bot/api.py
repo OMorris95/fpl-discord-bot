@@ -6,6 +6,10 @@ import time
 from pathlib import Path
 import aiohttp
 
+from bot.logging_config import get_logger
+
+logger = get_logger('api')
+
 # --- Constants ---
 BASE_API_URL = "https://fantasy.premierleague.com/api/"
 REQUEST_HEADERS = {
@@ -80,8 +84,23 @@ async def save_cache_with_meta(cache_path: Path, data: dict, gameweek: int = Non
 
 
 # --- API Functions ---
-async def fetch_fpl_api(session, url, cache_key=None, cache_gw=None, force_refresh=False):
-    """Fetches data from the FPL API asynchronously with optional caching."""
+async def fetch_fpl_api(session, url, cache_key=None, cache_gw=None, force_refresh=False,
+                        max_retries=3, base_backoff=1.0):
+    """
+    Fetches data from the FPL API asynchronously with optional caching and retry logic.
+
+    Args:
+        session: aiohttp ClientSession
+        url: API URL to fetch
+        cache_key: Optional cache key for storing response
+        cache_gw: Optional gameweek for cache key suffix
+        force_refresh: Force refresh even if cache exists
+        max_retries: Maximum number of retry attempts (default 3)
+        base_backoff: Base delay in seconds for exponential backoff (default 1.0)
+
+    Returns:
+        JSON data or None on failure
+    """
     cache_path = None
     if cache_key:
         cache_suffix = f"_gw{cache_gw}" if cache_gw is not None else ""
@@ -90,34 +109,62 @@ async def fetch_fpl_api(session, url, cache_key=None, cache_gw=None, force_refre
         if cached and not force_refresh:
             return cached.get("data", cached)
 
-    try:
-        # Use semaphore if available for rate limiting
-        if _api_semaphore:
-            await _api_semaphore.acquire()
+    last_error = None
+    for attempt in range(max_retries):
         try:
-            async with session.get(url, headers=REQUEST_HEADERS) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if cache_path and not force_refresh:
-                        payload = {"data": data, "gameweek": cache_gw}
-                        await save_cached_json(cache_path, payload)
-                    return data
-                else:
-                    print(f"Error fetching {url}: Status {response.status}")
-                    return None
-        finally:
+            # Use semaphore if available for rate limiting
             if _api_semaphore:
-                _api_semaphore.release()
-    except aiohttp.ClientError as e:
-        print(f"Request error for {url}: {e}")
-        return None
+                await _api_semaphore.acquire()
+            try:
+                async with session.get(url, headers=REQUEST_HEADERS) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if cache_path:
+                            payload = {"data": data, "gameweek": cache_gw}
+                            await save_cached_json(cache_path, payload)
+                        return data
+                    elif response.status >= 500:
+                        # Server error - retry with backoff
+                        last_error = f"Server error {response.status}"
+                        logger.warning(f"API server error: {url} returned {response.status} (attempt {attempt + 1}/{max_retries})")
+                    elif response.status == 429:
+                        # Rate limited - wait longer and retry
+                        last_error = "Rate limited"
+                        backoff = base_backoff * (4 ** attempt)  # More aggressive backoff for rate limits
+                        logger.warning(f"Rate limited on {url}, waiting {backoff:.1f}s before retry")
+                        await asyncio.sleep(backoff)
+                        continue
+                    else:
+                        # Client error (4xx except 429) - don't retry
+                        logger.warning(f"API request failed: {url} returned status {response.status}")
+                        return None
+            finally:
+                if _api_semaphore:
+                    _api_semaphore.release()
+
+            # Apply exponential backoff before retry for server errors
+            if attempt < max_retries - 1:
+                backoff = base_backoff * (2 ** attempt)
+                logger.debug(f"Retrying {url} in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(backoff)
+
+        except aiohttp.ClientError as e:
+            last_error = str(e)
+            logger.warning(f"Network error fetching {url}: {e} (attempt {attempt + 1}/{max_retries})")
+            if attempt < max_retries - 1:
+                backoff = base_backoff * (2 ** attempt)
+                await asyncio.sleep(backoff)
+
+    # All retries exhausted
+    logger.error(f"Failed to fetch {url} after {max_retries} attempts. Last error: {last_error}")
+    return None
 
 
 async def get_current_gameweek(session):
     """Determines the current FPL gameweek."""
     bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
     if bootstrap_data:
-        current_event = next((event for event in bootstrap_data['events'] if event['is_current']), None)
+        current_event = next((event for event in bootstrap_data.get('events', []) if event['is_current']), None)
         return current_event['id'] if current_event else None
     return None
 
@@ -126,10 +173,98 @@ async def get_last_completed_gameweek(session):
     """Determines the most recently completed FPL gameweek."""
     bootstrap_data = await fetch_fpl_api(session, f"{BASE_API_URL}bootstrap-static/")
     if bootstrap_data:
-        completed_events = [event for event in bootstrap_data['events'] if event['finished']]
+        completed_events = [event for event in bootstrap_data.get('events', []) if event['finished']]
         if completed_events:
             return max(completed_events, key=lambda x: x['id'])['id']
     return None
+
+
+async def get_bootstrap_data(session, cache_key: str = "bootstrap"):
+    """Fetches and returns bootstrap data with caching."""
+    return await fetch_fpl_api(
+        session,
+        f"{BASE_API_URL}bootstrap-static/",
+        cache_key=cache_key
+    )
+
+
+async def get_gameweek_info(session, bootstrap_data=None):
+    """
+    Gets the current or last finished gameweek info.
+
+    Returns:
+        dict with keys: 'gw' (int), 'is_finished' (bool), 'event' (dict)
+        or None if no gameweek found
+    """
+    if not bootstrap_data:
+        bootstrap_data = await get_bootstrap_data(session)
+
+    if not bootstrap_data:
+        return None
+
+    events = bootstrap_data.get('events', [])
+
+    # Try to find current gameweek first
+    gw_event = next((event for event in events if event.get('is_current')), None)
+
+    # Fall back to last finished gameweek
+    if not gw_event:
+        finished_events = [e for e in events if e.get('finished')]
+        if finished_events:
+            gw_event = max(finished_events, key=lambda x: x['id'])
+
+    if not gw_event:
+        return None
+
+    return {
+        'gw': gw_event['id'],
+        'is_finished': gw_event.get('finished', False),
+        'event': gw_event
+    }
+
+
+async def get_live_data(session, gameweek: int, bot_cache=None):
+    """
+    Fetches live event data for a gameweek.
+
+    Args:
+        session: aiohttp session
+        gameweek: Gameweek number
+        bot_cache: Optional bot.live_fpl_data cache to check first
+
+    Returns:
+        Live data dict or None
+    """
+    # Try to use bot cache if available and for the correct gameweek
+    if bot_cache and bot_cache.get('gw') == gameweek:
+        return bot_cache
+
+    return await fetch_fpl_api(
+        session,
+        f"{BASE_API_URL}event/{gameweek}/live/"
+    )
+
+
+async def get_league_data(session, league_id: int, gameweek: int = None, force_refresh: bool = False):
+    """
+    Fetches league standings data.
+
+    Args:
+        session: aiohttp session
+        league_id: FPL league ID
+        gameweek: Optional gameweek for cache key
+        force_refresh: Force refresh cache
+
+    Returns:
+        League data dict or None
+    """
+    return await fetch_fpl_api(
+        session,
+        f"{BASE_API_URL}leagues-classic/{league_id}/standings/",
+        cache_key=f"league_{league_id}_standings",
+        cache_gw=gameweek,
+        force_refresh=force_refresh
+    )
 
 
 async def get_league_managers(session, league_id):
@@ -518,6 +653,6 @@ async def cleanup_old_caches(current_gw: int, keep_last_n: int = 2):
             if file_gw < min_gw_to_keep:
                 try:
                     cache_file.unlink()
-                    print(f"Cleaned up old cache: {cache_file.name}")
-                except OSError:
-                    pass
+                    logger.debug(f"Cleaned up old cache: {cache_file.name}")
+                except OSError as e:
+                    logger.warning(f"Failed to delete cache file {cache_file.name}: {e}")

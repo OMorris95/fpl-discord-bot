@@ -4,6 +4,10 @@ import os
 import io
 from PIL import Image, ImageDraw, ImageFont
 
+from bot.logging_config import get_logger
+
+logger = get_logger('image')
+
 # --- File Paths ---
 BACKGROUND_IMAGE_PATH = "mobile-pitch-graphic.png"
 DREAMTEAM_BACKGROUND_PATH = "dream-pitch-graphic.png"
@@ -65,6 +69,70 @@ def get_jersey_filename(team_name: str, is_goalkeeper: bool = False) -> str:
     return f"{base_name}.png"
 
 
+def load_jersey_image(team_name: str, is_goalkeeper: bool = False, target_height: int = None):
+    """
+    Load and resize a jersey image for a team.
+
+    Args:
+        team_name: The FPL API team name
+        is_goalkeeper: Whether to try loading GK jersey first
+        target_height: Target height to resize to (maintains aspect ratio)
+
+    Returns:
+        PIL Image object or None if not found
+    """
+    jersey_filename = get_jersey_filename(team_name, is_goalkeeper)
+    jersey_path = os.path.join(JERSEYS_DIR, jersey_filename)
+
+    try:
+        jersey = Image.open(jersey_path).convert("RGBA")
+        if target_height:
+            scale = target_height / jersey.height
+            new_width = int(jersey.width * scale)
+            jersey = jersey.resize((new_width, target_height), Image.LANCZOS)
+        return jersey
+    except FileNotFoundError:
+        logger.warning(f"Jersey not found: {jersey_path}")
+        return None
+
+
+def draw_captain_indicator(background, draw, font, text: str, paste_x: int, paste_y: int,
+                          circle_size: int = 28, x_offset: int = 75, y_offset: int = -5):
+    """
+    Draw a captain/vice-captain indicator circle with text.
+
+    Args:
+        background: PIL Image to paste the circle onto
+        draw: ImageDraw object for text drawing
+        font: Font to use for the indicator text
+        text: Text to display ("C", "TC", or "V")
+        paste_x: X position of the jersey
+        paste_y: Y position of the jersey
+        circle_size: Size of the indicator circle (default 28)
+        x_offset: X offset from paste_x (default 75)
+        y_offset: Y offset from paste_y (default -5)
+    """
+    # Create antialiased circle using supersampling
+    scale = 4
+    circle_img = Image.new("RGBA", (circle_size * scale, circle_size * scale), (0, 0, 0, 0))
+    circle_draw = ImageDraw.Draw(circle_img)
+    circle_draw.ellipse([0, 0, circle_size * scale - 1, circle_size * scale - 1], fill="black")
+    circle_img = circle_img.resize((circle_size, circle_size), Image.LANCZOS)
+
+    # Position and paste circle
+    circle_x = paste_x + x_offset
+    circle_y = paste_y + y_offset
+    background.paste(circle_img, (circle_x, circle_y), circle_img)
+
+    # Draw centered text (with stroke for bold effect)
+    text_x = circle_x + circle_size // 2
+    text_y = circle_y + circle_size // 2
+    # Adjust Y position slightly for "V" to center better
+    if text == "V":
+        text_y += 1
+    draw.text((text_x, text_y), text, font=font, fill="white", anchor="mm", stroke_width=1, stroke_fill="white")
+
+
 def calculate_player_coordinates(picks, all_players, width, height):
     """Calculate x,y coordinates for each player based on their position."""
     starters = [p for p in picks if p['position'] <= 11]
@@ -115,7 +183,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         fixed_name_box_height = (name_sample_bbox[3] - name_sample_bbox[1]) + 4
         fixed_points_box_height = (points_sample_bbox[3] - points_sample_bbox[1]) + 4
     except Exception as e:
-        print(f"Error loading resources: {e}")
+        logger.error(f"Error loading image resources: {e}")
         return None
 
     all_players = {p['id']: p for p in fpl_data['bootstrap']['elements']}
@@ -153,23 +221,14 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
             points_text = f"({base_points}) pts"
 
         # --- Drawing logic ---
-        # Get team jersey
+        # Get team jersey using utility function
         team_id = player_info['team']
         team_name = all_teams[team_id]['name']
         is_goalkeeper = player_info['element_type'] == 1
-        jersey_filename = get_jersey_filename(team_name, is_goalkeeper)
-        jersey_path = os.path.join(JERSEYS_DIR, jersey_filename)
-
-        try:
-            asset_img = Image.open(jersey_path).convert("RGBA")
-            # Resize to target height, maintain aspect ratio (GK jerseys are wider)
-            target_height = JERSEY_SIZE[1]
-            scale = target_height / asset_img.height
-            new_width = int(asset_img.width * scale)
-            asset_img = asset_img.resize((new_width, target_height), Image.LANCZOS)
-        except FileNotFoundError:
-            print(f"Jersey not found: {jersey_path}")
+        asset_img = load_jersey_image(team_name, is_goalkeeper, target_height=JERSEY_SIZE[1])
+        if asset_img is None:
             continue
+
         x, y = coordinates[player_id]
         paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2 + JERSEY_Y_OFFSET
 
@@ -203,43 +262,9 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         if player_pick['is_captain']:
             active_chip = fpl_data['picks'].get('active_chip')
             captain_text = "TC" if active_chip == '3xc' else "C"
-
-            # Create antialiased circle using supersampling
-            circle_size = 28
-            scale = 4
-            circle_img = Image.new("RGBA", (circle_size * scale, circle_size * scale), (0, 0, 0, 0))
-            circle_draw = ImageDraw.Draw(circle_img)
-            circle_draw.ellipse([0, 0, circle_size * scale - 1, circle_size * scale - 1], fill="black")
-            circle_img = circle_img.resize((circle_size, circle_size), Image.LANCZOS)
-
-            # Position and paste circle
-            circle_x = paste_x + 75
-            circle_y = paste_y - 5
-            background.paste(circle_img, (circle_x, circle_y), circle_img)
-
-            # Draw centered text (with stroke for bold effect)
-            text_x = circle_x + circle_size // 2
-            text_y = circle_y + circle_size // 2
-            draw.text((text_x, text_y), captain_text, font=captain_font, fill="white", anchor="mm", stroke_width=1, stroke_fill="white")
-
+            draw_captain_indicator(background, draw, captain_font, captain_text, paste_x, paste_y)
         elif player_pick['is_vice_captain']:
-            # Create antialiased circle using supersampling
-            circle_size = 28
-            scale = 4
-            circle_img = Image.new("RGBA", (circle_size * scale, circle_size * scale), (0, 0, 0, 0))
-            circle_draw = ImageDraw.Draw(circle_img)
-            circle_draw.ellipse([0, 0, circle_size * scale - 1, circle_size * scale - 1], fill="black")
-            circle_img = circle_img.resize((circle_size, circle_size), Image.LANCZOS)
-
-            # Position and paste circle
-            circle_x = paste_x + 75
-            circle_y = paste_y - 5
-            background.paste(circle_img, (circle_x, circle_y), circle_img)
-
-            # Draw centered text (with stroke for bold effect)
-            text_x = circle_x + circle_size // 2
-            text_y = circle_y + circle_size // 2 + 1
-            draw.text((text_x, text_y), "V", font=captain_font, fill="white", anchor="mm", stroke_width=1, stroke_fill="white")
+            draw_captain_indicator(background, draw, captain_font, "V", paste_x, paste_y)
 
     # Draw Header Info (Team Name, GW Points, Total Points)
     header_y = 20
@@ -287,7 +312,7 @@ def generate_dreamteam_image(fpl_data, summary_data):
         fixed_name_box_height = (name_sample_bbox[3] - name_sample_bbox[1]) + 4
         fixed_points_box_height = (points_sample_bbox[3] - points_sample_bbox[1]) + 4
     except Exception as e:
-        print(f"Error loading resources: {e}")
+        logger.error(f"Error loading image resources: {e}")
         return None
 
     all_players = {p['id']: p for p in fpl_data['bootstrap']['elements']}
@@ -306,23 +331,14 @@ def generate_dreamteam_image(fpl_data, summary_data):
         is_bench_player = player_pick['position'] > 11 and multiplier == 0
         display_points = base_points if is_bench_player else base_points * multiplier
 
-        # Get team jersey
+        # Get team jersey using utility function
         team_id = player_info['team']
         team_name = all_teams[team_id]['name']
         is_goalkeeper = player_info['element_type'] == 1
-        jersey_filename = get_jersey_filename(team_name, is_goalkeeper)
-        jersey_path = os.path.join(JERSEYS_DIR, jersey_filename)
-
-        try:
-            asset_img = Image.open(jersey_path).convert("RGBA")
-            # Resize to target height, maintain aspect ratio (GK jerseys are wider)
-            target_height = JERSEY_SIZE[1]
-            scale = target_height / asset_img.height
-            new_width = int(asset_img.width * scale)
-            asset_img = asset_img.resize((new_width, target_height), Image.LANCZOS)
-        except FileNotFoundError:
-            print(f"Jersey not found: {jersey_path}")
+        asset_img = load_jersey_image(team_name, is_goalkeeper, target_height=JERSEY_SIZE[1])
+        if asset_img is None:
             continue
+
         x, y = coordinates[player_id]
         paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2 + JERSEY_Y_OFFSET
         background.paste(asset_img, (paste_x, paste_y), asset_img)
@@ -379,22 +395,11 @@ def generate_dreamteam_image(fpl_data, summary_data):
     potw_title_font = ImageFont.truetype(FONT_PATH, 36)  # Larger title
     potw_details_font = ImageFont.truetype(FONT_PATH, 28)  # Smaller details
 
-    # Load jersey for POTW (full size like pitch players)
+    # Load jersey for POTW using utility function
     team_id = potw_player_info['team']
     team_name = all_teams[team_id]['name']
     is_goalkeeper = potw_player_info['element_type'] == 1
-    jersey_filename = get_jersey_filename(team_name, is_goalkeeper)
-    jersey_path = os.path.join(JERSEYS_DIR, jersey_filename)
-
-    potw_img = None
-    try:
-        potw_img = Image.open(jersey_path).convert("RGBA")
-        target_height = JERSEY_SIZE[1]
-        scale = target_height / potw_img.height
-        new_width = int(potw_img.width * scale)
-        potw_img = potw_img.resize((new_width, target_height), Image.LANCZOS)
-    except FileNotFoundError:
-        pass
+    potw_img = load_jersey_image(team_name, is_goalkeeper, target_height=JERSEY_SIZE[1])
 
     # Draw "Player of the Week" title - centered horizontally, higher up
     title_text = "Player of the Week"
