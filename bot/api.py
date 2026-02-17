@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 import aiohttp
@@ -15,6 +16,15 @@ BASE_API_URL = "https://fantasy.premierleague.com/api/"
 REQUEST_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
 }
+
+# --- Backend Proxy Configuration ---
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3001")
+USE_BACKEND_PROXY = os.getenv("USE_BACKEND_PROXY", "true").lower() == "true"
+
+if USE_BACKEND_PROXY:
+    logger.info(f"Using backend proxy at {BACKEND_URL}")
+else:
+    logger.info("Backend proxy disabled - using direct FPL API calls")
 CACHE_DIR = Path("cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -109,6 +119,15 @@ async def fetch_fpl_api(session, url, cache_key=None, cache_gw=None, force_refre
         if cached and not force_refresh:
             return cached.get("data", cached)
 
+    # Determine the actual request URL (backend proxy or direct FPL)
+    if USE_BACKEND_PROXY and BACKEND_URL:
+        fpl_path = url.replace(BASE_API_URL, "")
+        request_url = f"{BACKEND_URL}/api/fpl/{fpl_path}"
+        request_headers = {}  # Backend handles User-Agent and proxy
+    else:
+        request_url = url
+        request_headers = REQUEST_HEADERS
+
     last_error = None
     for attempt in range(max_retries):
         try:
@@ -116,7 +135,7 @@ async def fetch_fpl_api(session, url, cache_key=None, cache_gw=None, force_refre
             if _api_semaphore:
                 await _api_semaphore.acquire()
             try:
-                async with session.get(url, headers=REQUEST_HEADERS) as response:
+                async with session.get(request_url, headers=request_headers) as response:
                     if response.status == 200:
                         data = await response.json()
                         if cache_path:
@@ -126,17 +145,17 @@ async def fetch_fpl_api(session, url, cache_key=None, cache_gw=None, force_refre
                     elif response.status >= 500:
                         # Server error - retry with backoff
                         last_error = f"Server error {response.status}"
-                        logger.warning(f"API server error: {url} returned {response.status} (attempt {attempt + 1}/{max_retries})")
+                        logger.warning(f"API server error: {request_url} returned {response.status} (attempt {attempt + 1}/{max_retries})")
                     elif response.status == 429:
                         # Rate limited - wait longer and retry
                         last_error = "Rate limited"
                         backoff = base_backoff * (4 ** attempt)  # More aggressive backoff for rate limits
-                        logger.warning(f"Rate limited on {url}, waiting {backoff:.1f}s before retry")
+                        logger.warning(f"Rate limited on {request_url}, waiting {backoff:.1f}s before retry")
                         await asyncio.sleep(backoff)
                         continue
                     else:
                         # Client error (4xx except 429) - don't retry
-                        logger.warning(f"API request failed: {url} returned status {response.status}")
+                        logger.warning(f"API request failed: {request_url} returned status {response.status}")
                         return None
             finally:
                 if _api_semaphore:
@@ -145,18 +164,18 @@ async def fetch_fpl_api(session, url, cache_key=None, cache_gw=None, force_refre
             # Apply exponential backoff before retry for server errors
             if attempt < max_retries - 1:
                 backoff = base_backoff * (2 ** attempt)
-                logger.debug(f"Retrying {url} in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})")
+                logger.debug(f"Retrying {request_url} in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})")
                 await asyncio.sleep(backoff)
 
         except aiohttp.ClientError as e:
             last_error = str(e)
-            logger.warning(f"Network error fetching {url}: {e} (attempt {attempt + 1}/{max_retries})")
+            logger.warning(f"Network error fetching {request_url}: {e} (attempt {attempt + 1}/{max_retries})")
             if attempt < max_retries - 1:
                 backoff = base_backoff * (2 ** attempt)
                 await asyncio.sleep(backoff)
 
     # All retries exhausted
-    logger.error(f"Failed to fetch {url} after {max_retries} attempts. Last error: {last_error}")
+    logger.error(f"Failed to fetch {request_url} after {max_retries} attempts. Last error: {last_error}")
     return None
 
 

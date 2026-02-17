@@ -129,7 +129,7 @@ class FPLBot(commands.Bot):
     async def setup_hook(self):
         init_database()
         self.session = aiohttp.ClientSession()
-        self.api_semaphore = asyncio.Semaphore(10)
+        self.api_semaphore = asyncio.Semaphore(50)
         set_api_semaphore(self.api_semaphore)  # Initialize API rate limiter
         self.live_data_loop.start()
         self.goal_check_loop.start()

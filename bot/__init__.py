@@ -43,6 +43,8 @@ from .api import (
     REQUEST_HEADERS,
     CACHE_DIR,
     CACHE_TTLS,
+    BACKEND_URL,
+    USE_BACKEND_PROXY,
 )
 
 from .image_generator import (

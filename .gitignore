@@ -8,3 +8,5 @@ deploy.bat
 cache/
 config/
 .claude/
+logs/
+*.log
