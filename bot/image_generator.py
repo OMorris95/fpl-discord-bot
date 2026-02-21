@@ -2,7 +2,7 @@
 
 import os
 import io
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from bot.logging_config import get_logger
 
@@ -13,7 +13,7 @@ BACKGROUND_IMAGE_PATH = "mobile-pitch-graphic.png"
 DREAMTEAM_BACKGROUND_PATH = "dream-pitch-graphic.png"
 FONT_PATH = "Geist-Medium.otf"
 JERSEYS_DIR = "team_jerseys"
-JERSEY_SIZE = (94, 125)  # ~10% smaller than original 104x146, maintains aspect ratio
+JERSEY_SIZE = (85, 113)  # ~18% smaller than original 104x146, maintains aspect ratio
 
 # --- Layout & Styling ---
 NAME_FONT_SIZE = 18
@@ -25,10 +25,16 @@ PLAYER_BOX_WIDTH = 110  # Fixed width to fit "XXXXXXXX..." at font size 20
 
 # --- Shared Layout Settings ---
 NAME_BOX_Y_OFFSET = 66      # Offset from player Y to name box
-JERSEY_Y_OFFSET = 10        # Offset for jersey paste position
+JERSEY_Y_OFFSET = 16        # Offset for jersey paste position
 NAME_TEXT_Y_OFFSET = -1     # Name text Y offset within box
 POINTS_BOX_COLOR = "#2E0F68"  # Purple
-NAME_BOX_COLOR = (0, 0, 0, 100)  # Black
+NAME_BOX_COLOR = (0, 0, 0, 200)  # Black, mostly opaque
+
+# --- Glassmorphism Settings ---
+GLASS_PADDING_TOP = 8       # Padding above jersey inside glass card
+GLASS_BLUR_RADIUS = 10      # Gaussian blur radius
+GLASS_TINT = (0, 0, 0, 102) # ~40% opacity black (dark mode style)
+GLASS_CORNER_RADIUS = 10    # Rounded top corners
 
 
 def format_player_price(player):
@@ -97,7 +103,7 @@ def load_jersey_image(team_name: str, is_goalkeeper: bool = False, target_height
 
 
 def draw_captain_indicator(background, draw, font, text: str, paste_x: int, paste_y: int,
-                          circle_size: int = 28, x_offset: int = 75, y_offset: int = -5):
+                          circle_size: int = 28, x_offset: int = 63, y_offset: int = -5):
     """
     Draw a captain/vice-captain indicator circle with text.
 
@@ -124,13 +130,57 @@ def draw_captain_indicator(background, draw, font, text: str, paste_x: int, past
     circle_y = paste_y + y_offset
     background.paste(circle_img, (circle_x, circle_y), circle_img)
 
+    # Use smaller font for "TC" so it fits in the circle
+    text_font = font
+    if text == "TC":
+        text_font = ImageFont.truetype(FONT_PATH, CAPTAIN_FONT_SIZE - 6)
+
     # Draw centered text (with stroke for bold effect)
     text_x = circle_x + circle_size // 2
     text_y = circle_y + circle_size // 2
     # Adjust Y position slightly for "V" to center better
     if text == "V":
         text_y += 1
-    draw.text((text_x, text_y), text, font=font, fill="white", anchor="mm", stroke_width=1, stroke_fill="white")
+    draw.text((text_x, text_y), text, font=text_font, fill="white", anchor="mm", stroke_width=1, stroke_fill="white")
+
+
+def draw_glass_card(background, card_x, card_y, card_w, card_h,
+                    blur_radius=GLASS_BLUR_RADIUS, tint=GLASS_TINT,
+                    corner_radius=GLASS_CORNER_RADIUS):
+    """Draw a glassmorphism card by blurring the background region and applying a dark tint.
+
+    Only top corners are rounded (matching website PlayerPill style).
+    """
+    # Clamp to image bounds
+    x1 = max(0, card_x)
+    y1 = max(0, card_y)
+    x2 = min(background.width, card_x + card_w)
+    y2 = min(background.height, card_y + card_h)
+
+    if x2 <= x1 or y2 <= y1:
+        return
+
+    w, h = x2 - x1, y2 - y1
+
+    # Crop the region from the background and blur it
+    region = background.crop((x1, y1, x2, y2)).convert("RGBA")
+    blurred = region.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+    # Apply dark tint overlay
+    tint_overlay = Image.new("RGBA", (w, h), tint)
+    blurred = Image.alpha_composite(blurred, tint_overlay)
+
+    # Create mask with rounded top corners only
+    mask = Image.new("L", (w, h), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle([0, 0, w - 1, h - 1], radius=corner_radius, fill=255)
+    # Square off bottom corners
+    if corner_radius > 0:
+        mask_draw.rectangle([0, h - corner_radius, corner_radius, h], fill=255)
+        mask_draw.rectangle([w - corner_radius, h - corner_radius, w, h], fill=255)
+
+    # Paste blurred+tinted region back using the mask
+    background.paste(blurred, (x1, y1), mask)
 
 
 def calculate_player_coordinates(picks, all_players, width, height):
@@ -232,6 +282,18 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         x, y = coordinates[player_id]
         paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2 + JERSEY_Y_OFFSET
 
+        # Pre-calculate box positions for glass card
+        box_width = PLAYER_BOX_WIDTH
+        name_box_x = x - box_width // 2
+        name_box_y = y + NAME_BOX_Y_OFFSET
+        name_box_height = fixed_name_box_height + POINTS_BOX_EXTRA_PADDING
+
+        # Draw glass card behind jersey + name area
+        glass_x = name_box_x
+        glass_y = paste_y - GLASS_PADDING_TOP
+        glass_h = (name_box_y + name_box_height) - glass_y
+        draw_glass_card(background, glass_x, glass_y, box_width, glass_h)
+
         # Add visual indicators for subs
         if was_subbed_out:
             red_overlay = Image.new("RGBA", asset_img.size, (255, 0, 0, 80))
@@ -240,6 +302,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
             green_overlay = Image.new("RGBA", asset_img.size, (0, 255, 0, 80))
             asset_img = Image.alpha_composite(asset_img, green_overlay)
 
+        # Paste jersey on top of glass card
         background.paste(asset_img, (paste_x, paste_y), asset_img)
 
         name_text = player_name
@@ -247,14 +310,13 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
             name_text = name_text[:8] + "..."
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
-        box_width = PLAYER_BOX_WIDTH
-        name_box_height = fixed_name_box_height + POINTS_BOX_EXTRA_PADDING
-        name_box_x = x - box_width // 2
-        name_box_y = y + NAME_BOX_Y_OFFSET
         points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
+
+        # Name box (black, inside glass card bottom)
         draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=NAME_BOX_COLOR)
+        # Points box (purple, below glass card)
         draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=POINTS_BOX_COLOR)
         draw.text((x - name_bbox[2] / 2, name_box_y + NAME_TEXT_Y_OFFSET), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
@@ -341,6 +403,20 @@ def generate_dreamteam_image(fpl_data, summary_data):
 
         x, y = coordinates[player_id]
         paste_x, paste_y = x - asset_img.width // 2, y - asset_img.height // 2 + JERSEY_Y_OFFSET
+
+        # Pre-calculate box positions for glass card
+        box_width = PLAYER_BOX_WIDTH
+        name_box_x = x - box_width // 2
+        name_box_y = y + NAME_BOX_Y_OFFSET
+        name_box_height = fixed_name_box_height + POINTS_BOX_EXTRA_PADDING
+
+        # Draw glass card behind jersey + name area
+        glass_x = name_box_x
+        glass_y = paste_y - GLASS_PADDING_TOP
+        glass_h = (name_box_y + name_box_height) - glass_y
+        draw_glass_card(background, glass_x, glass_y, box_width, glass_h)
+
+        # Paste jersey on top of glass card
         background.paste(asset_img, (paste_x, paste_y), asset_img)
 
         name_text = player_name
@@ -349,14 +425,13 @@ def generate_dreamteam_image(fpl_data, summary_data):
         points_text = f"{display_points} pts"
         name_bbox = draw.textbbox((0, 0), name_text, font=name_font)
         points_bbox = draw.textbbox((0, 0), points_text, font=points_font)
-        box_width = PLAYER_BOX_WIDTH
-        name_box_height = fixed_name_box_height + POINTS_BOX_EXTRA_PADDING
-        name_box_x = x - box_width // 2
-        name_box_y = y + NAME_BOX_Y_OFFSET
         points_box_height = fixed_points_box_height + POINTS_BOX_EXTRA_PADDING
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
+
+        # Name box (black, inside glass card bottom)
         draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=NAME_BOX_COLOR)
+        # Points box (purple, below glass card)
         draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=POINTS_BOX_COLOR)
         draw.text((x - name_bbox[2] / 2, name_box_y + NAME_TEXT_Y_OFFSET), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
