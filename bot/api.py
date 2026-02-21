@@ -55,30 +55,26 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
         gw_points = 0
         active_chip = picks_data.get('active_chip')
 
-        # Determine captain status first
+        # Helper: check if ALL of a player's team's fixtures have finished (handles DGW)
+        gw_fixtures = live_data.get('fixtures', [])
+        def has_team_finished(team_id):
+            team_fixtures = [f for f in gw_fixtures if f['team_h'] == team_id or f['team_a'] == team_id]
+            if not team_fixtures:
+                return False
+            return all(f.get('finished', False) for f in team_fixtures)
+
+        # Determine captain status
         captain_pick = next((p for p in picks_data['picks'] if p['is_captain']), None)
         captain_played = True
         if captain_pick:
             captain_id = captain_pick['element']
             captain_minutes = live_points_map.get(captain_id, {}).get('minutes', 0)
+            captain_team_id = all_players_map.get(captain_id, {}).get('team')
 
-            # Find the captain's team ID from bootstrap data
-            captain_player_details = all_players_map.get(captain_id)
-            captain_team_id = captain_player_details['team'] if captain_player_details else None
-
-            # Find the captain's fixture from the live data
-            captain_fixture = None
-            if captain_team_id and 'fixtures' in live_data:
-                captain_fixture = next((f for f in live_data['fixtures'] if f['team_h'] == captain_team_id or f['team_a'] == captain_team_id), None)
-
-            # Captain is considered not to have played if his minutes are 0 AND his game is over
-            if captain_minutes == 0 and captain_fixture and captain_fixture.get('finished', False):
+            # Captain hasn't played only if 0 minutes AND all their games are finished
+            if captain_minutes == 0 and captain_team_id and has_team_finished(captain_team_id):
                 captain_played = False
-            # If the captain's game hasn't finished, he's still considered 'playing' for captaincy purposes
-            elif captain_minutes == 0 and (not captain_fixture or not captain_fixture.get('finished', False)):
-                captain_played = True
 
-        # --- MANUAL SUBSTITUTION LOGIC ---
         if active_chip == 'bboost':
             scoring_picks = picks_data['picks']
         else:
@@ -89,22 +85,26 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
 
             # 1. Substitute goalkeeper if needed
             starting_gk = next((p for p in squad if all_players_map[p['element']]['element_type'] == 1), None)
-            if starting_gk and live_points_map.get(starting_gk['element'], {}).get('minutes', 0) == 0:
-                sub_gk = next((p for p in bench if all_players_map[p['element']]['element_type'] == 1), None)
-                if sub_gk and live_points_map.get(sub_gk['element'], {}).get('minutes', 0) > 0:
-                    squad = [sub_gk if p == starting_gk else p for p in squad]
+            if starting_gk:
+                gk_team_id = all_players_map[starting_gk['element']]['team']
+                gk_minutes = live_points_map.get(starting_gk['element'], {}).get('minutes', 0)
+                if gk_minutes == 0 and has_team_finished(gk_team_id):
+                    sub_gk = next((p for p in bench if all_players_map[p['element']]['element_type'] == 1), None)
+                    if sub_gk and live_points_map.get(sub_gk['element'], {}).get('minutes', 0) > 0:
+                        squad = [sub_gk if p == starting_gk else p for p in squad]
 
             # 2. Substitute outfield players
             for sub_in_player in bench:
                 if all_players_map[sub_in_player['element']]['element_type'] == 1 or live_points_map.get(sub_in_player['element'], {}).get('minutes', 0) == 0:
                     continue
 
-                player_subbed_out = None
-
-                # Find a player to replace
+                # Find a starter to replace with this bench player
                 for i, player_to_replace in enumerate(squad):
                     is_outfield = all_players_map[player_to_replace['element']]['element_type'] != 1
-                    did_not_play = live_points_map.get(player_to_replace['element'], {}).get('minutes', 0) == 0
+                    player_minutes = live_points_map.get(player_to_replace['element'], {}).get('minutes', 0)
+                    player_team_id = all_players_map[player_to_replace['element']]['team']
+                    # Only sub out if player has 0 minutes AND their game has finished
+                    did_not_play = player_minutes == 0 and has_team_finished(player_team_id)
 
                     if is_outfield and did_not_play:
                         # Create a potential new squad with the sub
@@ -118,12 +118,8 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
                             counts[player_type] += 1
 
                         if counts[1] == 1 and counts[2] >= 3 and counts[3] >= 2 and counts[4] >= 1:
-                            player_subbed_out = player_to_replace
                             squad = potential_squad
                             break  # Sub successful, move to next bench player
-
-                if player_subbed_out:
-                    break
 
             scoring_picks = squad
 

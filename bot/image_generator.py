@@ -242,6 +242,24 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
     width, height = background.size
     coordinates = calculate_player_coordinates(fpl_data['picks']['picks'], all_players, width, height)
 
+    # Build fixture lookup per team for unstarted games
+    live_fixtures = fpl_data['live'].get('fixtures', [])
+    team_fixture_map = {}  # team_id -> fixture
+    for fix in live_fixtures:
+        team_fixture_map[fix['team_h']] = fix
+        team_fixture_map[fix['team_a']] = fix
+
+    def get_fixture_text(team_id):
+        """Return fixture text like 'ARS (H)' if the player's game hasn't started, else None."""
+        fix = team_fixture_map.get(team_id)
+        if not fix or fix.get('started', False):
+            return None
+        is_home = fix['team_h'] == team_id
+        opp_id = fix['team_a'] if is_home else fix['team_h']
+        opp_team = all_teams.get(opp_id, {})
+        opp_name = opp_team.get('short_name', '???')
+        return f"{opp_name} ({'H' if is_home else 'A'})"
+
     # Determine the final set of scoring players from the provided data
     scoring_picks_data = fpl_data['picks'].get('scoring_picks', [])
     scoring_player_ids = {p['element'] for p in scoring_picks_data}
@@ -256,6 +274,9 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         was_subbed_out = is_starter and player_id not in scoring_player_ids and is_finished
         was_subbed_in = not is_starter and player_id in scoring_player_ids and is_finished
 
+        # Check if this player's game hasn't started yet
+        fixture_text = get_fixture_text(player_info['team'])
+
         # Determine points to display
         display_points = base_points
         scoring_pick_details = next((p for p in scoring_picks_data if p['element'] == player_id), None)
@@ -264,7 +285,10 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
             final_multiplier = scoring_pick_details.get('final_multiplier', 1)
             display_points = base_points * final_multiplier
 
-        points_text = f"{display_points} pts"
+        if fixture_text:
+            points_text = fixture_text
+        else:
+            points_text = f"{display_points} pts"
 
         # For subbed out starters, show their base points but they won't be summed
         if was_subbed_out:
@@ -318,9 +342,10 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         r = 5
         draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=r, fill=NAME_BOX_COLOR)
         draw.rectangle([name_box_x, name_box_y + name_box_height - r, name_box_x + box_width, name_box_y + name_box_height], fill=NAME_BOX_COLOR)
-        # Points box (purple, flat top, rounded bottom corners)
-        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=r, fill=POINTS_BOX_COLOR)
-        draw.rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + r], fill=POINTS_BOX_COLOR)
+        # Points box (purple for points, grey for upcoming fixture)
+        pts_color = "#374151" if fixture_text else POINTS_BOX_COLOR
+        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=r, fill=pts_color)
+        draw.rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + r], fill=pts_color)
         draw.text((x - name_bbox[2] / 2, name_box_y + NAME_TEXT_Y_OFFSET), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
