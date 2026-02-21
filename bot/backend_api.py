@@ -13,6 +13,11 @@ logger = get_logger('backend_api')
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3001")
 
 
+class FplUnavailableError(Exception):
+    """Raised when the FPL API appears to be updating or unavailable."""
+    pass
+
+
 async def _get(session: aiohttp.ClientSession, path: str, params: dict = None):
     """Make a GET request to the backend API."""
     url = f"{BACKEND_URL}{path}"
@@ -20,10 +25,20 @@ async def _get(session: aiohttp.ClientSession, path: str, params: dict = None):
         async with session.get(url, params=params) as response:
             if response.status == 200:
                 return await response.json()
+            elif response.status in (502, 503, 504):
+                logger.warning(f"FPL unavailable ({response.status}) for {path}")
+                raise FplUnavailableError()
             else:
                 logger.warning(f"Backend returned {response.status} for {path}")
                 return None
-    except aiohttp.ClientError as e:
+    except FplUnavailableError:
+        raise
+    except (aiohttp.ClientError, ConnectionError) as e:
+        error_str = str(e)
+        # Detect FPL API update errors (truncated responses, connection resets)
+        if any(hint in error_str for hint in ('ContentLengthError', 'ConnectionReset', 'network name is no longer available')):
+            logger.warning(f"FPL appears to be updating for {path}: {e}")
+            raise FplUnavailableError()
         logger.error(f"Backend request failed for {path}: {e}")
         return None
 

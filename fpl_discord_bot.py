@@ -30,6 +30,7 @@ from bot.backend_api import (
     get_league_standings, get_league_picks, get_league_history,
     get_league_transfers, get_manager_picks, get_manager_transfers,
     get_current_gameweek, get_last_completed_gameweek, get_gameweek_info,
+    FplUnavailableError,
 )
 from bot.image_generator import (
     generate_team_image, generate_dreamteam_image, format_manager_link,
@@ -159,7 +160,7 @@ class FPLBot(commands.Bot):
 
             # Filter to current GW fixtures
             gw_fixtures = [f for f in fixtures if f.get('event') == current_gw]
-            live_fixtures = [f for f in gw_fixtures if f.get('started', False) and not f.get('finished_provisional', True)]
+            live_fixtures = [f for f in gw_fixtures if f.get('started', False) and not f.get('finished_provisional', False)]
 
             if not live_fixtures:
                 if self.live_fpl_data is not None:
@@ -176,6 +177,8 @@ class FPLBot(commands.Bot):
                 logger.debug(f"Live data updated for GW {current_gw}. {len(live_fixtures)} fixture(s) in progress.")
             else:
                 self.live_fpl_data = None
+        except FplUnavailableError:
+            logger.warning("FPL API unavailable during live data poll, keeping existing cache.")
         except Exception as e:
             logger.error(f"Error in live_data_loop: {e}", exc_info=True)
             self.live_fpl_data = None
@@ -183,12 +186,12 @@ class FPLBot(commands.Bot):
     @tasks.loop(seconds=60)
     async def goal_check_loop(self):
         await self.wait_until_ready()
-        
+
         live_data = self.live_fpl_data
         if not live_data:
             self.last_known_goals = {}
             return
-        
+
         current_gw = live_data.get('gw')
         if not current_gw:
             return
@@ -200,9 +203,20 @@ class FPLBot(commands.Bot):
                 self.last_known_goals[player_stats['id']] = player_stats['stats']['goals_scored']
             return
 
-        bootstrap_data = await get_bootstrap(self.session)
-        if not bootstrap_data: return
+        try:
+            bootstrap_data = await get_bootstrap(self.session)
+        except FplUnavailableError:
+            logger.warning("FPL unavailable during goal check, skipping this cycle.")
+            return
+        if not bootstrap_data:
+            return
 
+        # Build lookup maps once
+        all_players = {p['id']: p for p in bootstrap_data.get('elements', [])}
+        all_teams = {t['id']: t for t in bootstrap_data.get('teams', [])}
+
+        # Collect all new goals first, then process alerts
+        new_goal_events = []
         for player_stats in live_data.get('elements', []):
             player_id = player_stats['id']
             new_goals = player_stats['stats']['goals_scored']
@@ -210,84 +224,112 @@ class FPLBot(commands.Bot):
 
             if new_goals > old_goals:
                 self.last_known_goals[player_id] = new_goals
-                
-                goals_scored = new_goals - old_goals
-                player_info = next((p for p in bootstrap_data.get('elements', []) if p['id'] == player_id), None)
-                if not player_info: continue
+                new_goal_events.append((player_id, new_goals - old_goals))
 
-                team_id = player_info['team']
-                fixture = next((f for f in live_data.get('fixtures', []) if f['team_h'] == team_id or f['team_a'] == team_id), None)
-                if not fixture: continue
-                
-                opponent_id = fixture['team_a'] if fixture['team_h'] == team_id else fixture['team_h']
-                opponent_team = next((t for t in bootstrap_data.get('teams', []) if t['id'] == opponent_id), None)
-                opponent_name = opponent_team['name'] if opponent_team else "Unknown"
-                player_team = next((t for t in bootstrap_data.get('teams', []) if t['id'] == team_id), None)
+        if not new_goal_events:
+            return
 
-                # --- Find owners and broadcast ---
-                for sub in (await asyncio.to_thread(get_all_goal_subscriptions)):
-                    channel = self.get_channel(int(sub['channel_id']))
-                    if not channel or not channel.guild: continue
+        # Get all subscriptions once
+        all_subs = await asyncio.to_thread(get_all_goal_subscriptions)
+        if not all_subs:
+            return
 
-                    goal_alerts_on = True # This is implied by being in the table
-                    transfer_alerts_on = sub['transfer_alerts_enabled']
-                    league_id = sub['league_id']
+        # Reset picks/transfers cache if gameweek changed
+        if self.picks_cache.get('gw') != current_gw:
+            self.picks_cache = {'gw': current_gw}
+            self.transfers_cache = {'gw': current_gw}
 
-                    # --- Caching ---
-                    # Reset cache if gameweek changed
-                    if self.picks_cache.get('gw') != current_gw:
-                        self.picks_cache = {'gw': current_gw}
-                        self.transfers_cache = {'gw': current_gw}
+        # Pre-fetch picks/transfers for all leagues we need
+        for sub in all_subs:
+            league_id = sub['league_id']
+            channel = self.get_channel(int(sub['channel_id']))
+            if not channel or not channel.guild:
+                continue
 
-                    # Fetch data for this league if not already cached
-                    if league_id not in self.picks_cache:
-                        self.picks_cache[league_id] = {}
-                        self.transfers_cache[league_id] = {}
-                        linked_users = await asyncio.to_thread(get_linked_users, channel.guild.id, league_id)
-
-                        async def fetch_manager_data(user):
+            # Cache key includes guild to handle same league in different servers
+            cache_key = (league_id, channel.guild.id)
+            if cache_key not in self.picks_cache:
+                self.picks_cache[cache_key] = {}
+                self.transfers_cache[cache_key] = {}
+                try:
+                    linked_users = await asyncio.to_thread(get_linked_users, channel.guild.id, league_id)
+                    for user in linked_users:
+                        try:
                             picks, transfers = await asyncio.gather(
                                 get_manager_picks(self.session, user['fpl_team_id'], current_gw),
                                 get_manager_transfers(self.session, user['fpl_team_id'])
                             )
-                            if picks: self.picks_cache[league_id][user['discord_user_id']] = picks
-                            if transfers: self.transfers_cache[league_id][user['discord_user_id']] = transfers
+                            if picks:
+                                self.picks_cache[cache_key][user['discord_user_id']] = picks
+                            if transfers:
+                                self.transfers_cache[cache_key][user['discord_user_id']] = transfers
+                        except FplUnavailableError:
+                            logger.warning(f"FPL unavailable fetching picks for user {user['fpl_team_id']}, skipping.")
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch data for user {user['fpl_team_id']}: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch linked users for league {league_id}: {e}")
 
-                        await asyncio.gather(*[fetch_manager_data(u) for u in linked_users])
+        # Process each goal event
+        for player_id, goals_scored in new_goal_events:
+            player_info = all_players.get(player_id)
+            if not player_info:
+                continue
 
-                    # --- Logic ---
-                    owners, benched, transferors = [], [], []
-                    
-                    # Find owners
-                    for user_id, picks in self.picks_cache.get(league_id, {}).items():
-                        for pick in picks.get('picks', []):
-                            if pick['element'] == player_id:
-                                if pick['position'] <= 11: owners.append(f"<@{user_id}>")
-                                else: benched.append(f"<@{user_id}>")
-                    
-                    # Find transferors if alert is enabled
-                    if transfer_alerts_on:
-                        for user_id, transfers in self.transfers_cache.get(league_id, {}).items():
-                            # Check transfers for the current gameweek
-                            for transfer in [t for t in transfers if t.get('event') == current_gw]:
-                                if transfer['element_out'] == player_id:
-                                    transferors.append(f"<@{user_id}>")
-                    
-                    # --- Send Message ---
-                    if (goal_alerts_on and (owners or benched)) or (transfer_alerts_on and transferors):
-                        embed = discord.Embed(
-                            title=f"⚽ GOAL: {player_info['web_name']} ({player_team['short_name']})",
-                            description=f"Scored {goals_scored} goal(s) against **{opponent_name}**!",
-                            color=discord.Color.green()
-                        )
-                        if goal_alerts_on:
-                            if owners: embed.add_field(name="Owned By", value=", ".join(owners), inline=False)
-                            if benched: embed.add_field(name="Benched By (🤡)", value=", ".join(benched), inline=False)
-                        
-                        if transfer_alerts_on and transferors:
-                            embed.add_field(name="🤣 Transferred Out By", value=", ".join(transferors), inline=False)
-                        
+            team_id = player_info['team']
+            fixture = next((f for f in live_data.get('fixtures', []) if f['team_h'] == team_id or f['team_a'] == team_id), None)
+            if not fixture:
+                continue
+
+            opponent_id = fixture['team_a'] if fixture['team_h'] == team_id else fixture['team_h']
+            opponent_name = all_teams.get(opponent_id, {}).get('name', 'Unknown')
+            player_team = all_teams.get(team_id)
+
+            # Broadcast to each subscribed channel
+            for sub in all_subs:
+                channel = self.get_channel(int(sub['channel_id']))
+                if not channel or not channel.guild:
+                    continue
+
+                transfer_alerts_on = sub['transfer_alerts_enabled']
+                league_id = sub['league_id']
+                cache_key = (league_id, channel.guild.id)
+
+                # --- Find owners, benched, and transferors ---
+                owners, benched, transferors = [], [], []
+
+                for user_id, picks in self.picks_cache.get(cache_key, {}).items():
+                    for pick in picks.get('picks', []):
+                        if pick['element'] == player_id:
+                            if pick['position'] <= 11:
+                                owners.append(f"<@{user_id}>")
+                            else:
+                                benched.append(f"<@{user_id}>")
+
+                if transfer_alerts_on:
+                    for user_id, transfers in self.transfers_cache.get(cache_key, {}).items():
+                        for transfer in [t for t in transfers if t.get('event') == current_gw]:
+                            if transfer['element_out'] == player_id:
+                                transferors.append(f"<@{user_id}>")
+
+                # --- Send Message ---
+                if owners or benched or (transfer_alerts_on and transferors):
+                    embed = discord.Embed(
+                        title=f"⚽ GOAL: {player_info['web_name']} ({player_team['short_name'] if player_team else '???'})",
+                        description=f"Scored {goals_scored} goal(s) against **{opponent_name}**!",
+                        color=discord.Color.green()
+                    )
+                    if owners:
+                        embed.add_field(name="Owned By", value=", ".join(owners), inline=False)
+                    if benched:
+                        embed.add_field(name="Benched By (🤡)", value=", ".join(benched), inline=False)
+                    if transfer_alerts_on and transferors:
+                        embed.add_field(name="🤣 Transferred Out By", value=", ".join(transferors), inline=False)
+
+                    try:
                         await channel.send(embed=embed)
+                    except discord.HTTPException as e:
+                        logger.warning(f"Failed to send goal alert to channel {channel.id}: {e}")
 
     async def close(self):
         if self.session:
@@ -337,6 +379,12 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         await send_error("You don't have permission to use this command.")
 
     else:
+        # Check if the underlying cause is FPL being unavailable
+        original = getattr(error, 'original', None) or error.__cause__
+        if isinstance(original, FplUnavailableError):
+            await send_error("FPL is currently updating. Please try again shortly.", ephemeral=False)
+            return
+
         # Log unexpected errors with full traceback
         command_name = interaction.command.name if interaction.command else "Unknown"
         logger.error(
