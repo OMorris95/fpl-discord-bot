@@ -41,6 +41,7 @@ load_dotenv()
 
 # --- CONFIGURATION ---
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+WEBSITE_URL = os.getenv("WEBSITE_URL", "http://192.168.1.109:5173")
 CONFIG_PATH = Path("config/league_config.json")
 
 def load_league_config():
@@ -727,7 +728,11 @@ async def team(interaction: discord.Interaction, manager: str = None):
     if image_bytes:
         file = discord.File(fp=image_bytes, filename="fpl_team.png")
         manager_name = selected_manager_details.get('name', 'Manager')
-        await interaction.followup.send(f"**{manager_name}'s Team for GW {current_gw}**", file=file)
+        stats_url = f"{WEBSITE_URL}/manager/{manager_id}/stats"
+        await interaction.followup.send(
+            f"**[{manager_name}'s Team for GW {current_gw}](<{stats_url}>)**",
+            file=file
+        )
     else:
         await interaction.followup.send("Sorry, there was an error creating the team image.")
 
@@ -848,10 +853,7 @@ async def table(interaction: discord.Interaction):
 
     table_lines.append("```")
 
-    has_next_page = league_data.get('standings', {}).get('has_next', False)
-    if len(manager_details) > TABLE_LIMIT or has_next_page:
-        league_url = f"https://fantasy.premierleague.com/leagues/{league_id}/standings/c"
-        table_lines.append(f"Only showing top {TABLE_LIMIT}. View full table at <{league_url}>")
+    table_lines.append(f"[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league?{league_id}>)")
 
     await interaction.followup.send("\n".join(table_lines))
 
@@ -926,7 +928,8 @@ async def player(interaction: discord.Interaction, player: str):
             embed.add_field(name=f"Owned By ({len(owners)})", value="\n".join(owners), inline=True)
         if benched:
             embed.add_field(name=f"Benched By ({len(benched)})", value="\n".join(benched), inline=True)
-    
+
+    embed.add_field(name="\u200b", value=f"[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league?{league_id}>)", inline=False)
     await interaction.followup.send(embed=embed)
 
 @player.autocomplete('player')
@@ -1112,7 +1115,9 @@ async def dreamteam(interaction: discord.Interaction):
     image_bytes = await asyncio.to_thread(generate_dreamteam_image, fpl_data_for_image, summary_data)
     if image_bytes:
         file = discord.File(fp=image_bytes, filename="fpl_dreamteam.png")
-        await interaction.followup.send(f"🌟 **Dream Team for GW {last_completed_gw}** 🌟", file=file)
+        await interaction.followup.send(
+            f"🌟 **Dream Team for GW {last_completed_gw}** 🌟\n[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league>)", file=file
+        )
     else:
         await interaction.followup.send("Sorry, there was an error creating the dream team image.")
 
@@ -1210,10 +1215,13 @@ async def transfers(interaction: discord.Interaction):
         for field in chunk:
             embed.add_field(name=field['name'], value=field['value'], inline=False)
         
+        if i + 25 >= len(fields):
+            embed.add_field(name="\u200b", value=f"[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league?{league_id}>)", inline=False)
+
         if i == 0:
             await interaction.followup.send(embed=embed)
         else:
-            await interaction.channel.send(embed=embed)
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="captains", description="Shows which player each manager captained for the current gameweek.")
 async def captains(interaction: discord.Interaction):
@@ -1457,7 +1465,8 @@ async def h2h(interaction: discord.Interaction, manager_a: str, manager_b: str):
 
     embed.add_field(name=f"{player1_name}'s Differentials", value="\n".join(diffs1_names) or "None", inline=True)
     embed.add_field(name=f"{player2_name}'s Differentials", value="\n".join(diffs2_names) or "None", inline=True)
-    
+
+    embed.add_field(name="\u200b", value=f"[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league?{league_id}>)", inline=False)
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="shame", description="Highlights the biggest manager mistakes from the last completed gameweek.")
@@ -1603,6 +1612,7 @@ async def shame(interaction: discord.Interaction):
     if not shame_found:
         embed.description = f"🎉 No manager mistakes found for GW {completed_gw}! Everyone is a winner."
 
+    embed.add_field(name="\u200b", value=f"[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league?{league_id}>)", inline=False)
     await interaction.followup.send(embed=embed)
 
 if __name__ == "__main__":
