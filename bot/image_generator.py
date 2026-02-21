@@ -314,10 +314,13 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
 
-        # Name box (black, inside glass card bottom)
-        draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=NAME_BOX_COLOR)
-        # Points box (purple, below glass card)
-        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=POINTS_BOX_COLOR)
+        # Name box (black, rounded top corners, flat bottom)
+        r = 5
+        draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=r, fill=NAME_BOX_COLOR)
+        draw.rectangle([name_box_x, name_box_y + name_box_height - r, name_box_x + box_width, name_box_y + name_box_height], fill=NAME_BOX_COLOR)
+        # Points box (purple, flat top, rounded bottom corners)
+        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=r, fill=POINTS_BOX_COLOR)
+        draw.rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + r], fill=POINTS_BOX_COLOR)
         draw.text((x - name_bbox[2] / 2, name_box_y + NAME_TEXT_Y_OFFSET), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
@@ -429,10 +432,13 @@ def generate_dreamteam_image(fpl_data, summary_data):
         points_box_x = name_box_x
         points_box_y = name_box_y + name_box_height
 
-        # Name box (black, inside glass card bottom)
-        draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=5, fill=NAME_BOX_COLOR)
-        # Points box (purple, below glass card)
-        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=5, fill=POINTS_BOX_COLOR)
+        # Name box (black, rounded top corners, flat bottom)
+        r = 5
+        draw.rounded_rectangle([name_box_x, name_box_y, name_box_x + box_width, name_box_y + name_box_height], radius=r, fill=NAME_BOX_COLOR)
+        draw.rectangle([name_box_x, name_box_y + name_box_height - r, name_box_x + box_width, name_box_y + name_box_height], fill=NAME_BOX_COLOR)
+        # Points box (purple, flat top, rounded bottom corners)
+        draw.rounded_rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + points_box_height], radius=r, fill=POINTS_BOX_COLOR)
+        draw.rectangle([points_box_x, points_box_y, points_box_x + box_width, points_box_y + r], fill=POINTS_BOX_COLOR)
         draw.text((x - name_bbox[2] / 2, name_box_y + NAME_TEXT_Y_OFFSET), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
