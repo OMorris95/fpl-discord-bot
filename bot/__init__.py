@@ -21,30 +21,22 @@ from .database import (
     DB_PATH,
 )
 
-from .api import (
-    fetch_fpl_api,
+from .api import get_live_manager_details
+
+from .backend_api import (
+    get_bootstrap,
+    get_live_data,
+    get_fixtures,
+    get_league_standings,
+    get_league_picks,
+    get_league_history,
+    get_league_transfers,
+    get_manager_picks,
+    get_manager_history,
+    get_manager_transfers,
     get_current_gameweek,
     get_last_completed_gameweek,
-    get_bootstrap_data,
     get_gameweek_info,
-    get_live_data,
-    get_league_data,
-    get_league_managers,
-    get_live_manager_details,
-    get_manager_transfer_activity,
-    get_league_picks_cached,
-    get_league_history_cached,
-    cleanup_old_caches,
-    is_cache_fresh,
-    load_cached_json,
-    save_cached_json,
-    set_api_semaphore,
-    BASE_API_URL,
-    REQUEST_HEADERS,
-    CACHE_DIR,
-    CACHE_TTLS,
-    BACKEND_URL,
-    USE_BACKEND_PROXY,
 )
 
 from .image_generator import (
