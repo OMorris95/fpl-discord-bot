@@ -42,16 +42,18 @@ def format_player_price(player):
     return f"£{player.get('now_cost', 0) / 10:.1f}m"
 
 
-def build_manager_url(entry_id, gameweek=None):
-    """Return the FPL website URL for a manager's team."""
+def build_manager_url(entry_id, gameweek=None, base_url=None):
+    """Return the URL for a manager's team on our site, or FPL as fallback."""
+    if base_url:
+        return f"{base_url}/manager/{entry_id}/stats"
     if gameweek:
         return f"https://fantasy.premierleague.com/entry/{entry_id}/event/{gameweek}"
     return f"https://fantasy.premierleague.com/entry/{entry_id}/history/"
 
 
-def format_manager_link(label, entry_id, gameweek=None):
-    """Wrap a label in Markdown linking to the manager's FPL team."""
-    url = build_manager_url(entry_id, gameweek)
+def format_manager_link(label, entry_id, gameweek=None, base_url=None):
+    """Wrap a label in Markdown linking to the manager's team."""
+    url = build_manager_url(entry_id, gameweek, base_url)
     return f"[{label}]({url})"
 
 
