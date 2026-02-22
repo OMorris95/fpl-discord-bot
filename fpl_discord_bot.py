@@ -356,7 +356,7 @@ class FPLBot(commands.Bot):
 
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
-        await bot.change_presence(status=discord.Status.online, activity=discord.Game(name="Fantasy Premier League"))
+        await bot.change_presence(status=discord.Status.online, activity=discord.Game(name="www.livefplstats.com"))
         logger.info("Bot is ready and online.")
 
 bot = FPLBot()
@@ -958,7 +958,7 @@ async def player(interaction: discord.Interaction, player: str):
         await interaction.followup.send("Player not found.")
         return
 
-    player_name = f"{selected_player['first_name']} {selected_player['second_name']}"
+    player_name = selected_player['web_name']
 
     # Use backend league picks (DB-cached)
     raw_picks = await get_league_picks(session, int(league_id), current_gw)
@@ -1329,7 +1329,7 @@ async def captains(interaction: discord.Interaction):
                 captain_id = captain_pick['element']
                 captain_player_info = all_players.get(captain_id)
                 if captain_player_info:
-                    captain_name = f"{captain_player_info['first_name']} {captain_player_info['second_name']}"
+                    captain_name = captain_player_info['web_name']
                     manager_link = format_manager_link(manager_name, manager_id, current_gw, WEBSITE_URL)
                     captain_info.append(f"{manager_link} - **{captain_name}**")
     
@@ -1368,11 +1368,14 @@ async def fixtures(interaction: discord.Interaction, team: str = None):
     teams_map = {t['id']: t for t in bootstrap_data.get('teams', [])}
     
     embed = discord.Embed(title="Upcoming Fixtures", color=discord.Color.blue())
+    embed.description = "```\nEasy           Hard    Blank\n🟢  🟩  ⬜  🟧  🟥      ⛔\n```"
 
     team_id_to_show = int(team) if team else None
 
     def get_fdr_emoji(difficulty):
-        if difficulty <= 2:
+        if difficulty == 1:
+            return "🟢"
+        elif difficulty == 2:
             return "🟩"
         elif difficulty == 3:
             return "⬜"
@@ -1381,50 +1384,80 @@ async def fixtures(interaction: discord.Interaction, team: str = None):
         else:
             return "🟥"
 
-    upcoming_fixtures = [
-        f for f in fixtures_data 
-        if not f.get('finished', True) and f.get('event') and current_gw <= f['event'] < current_gw + 5
-    ]
-    
     if team_id_to_show:
-        team_name = teams_map[team_id_to_show]['name']
-        team_fixtures = [f for f in upcoming_fixtures if f['team_h'] == team_id_to_show or f['team_a'] == team_id_to_show]
-        
-        fixture_lines = []
-        for f in sorted(team_fixtures, key=lambda x: x['event']):
-            is_home = f['team_h'] == team_id_to_show
-            opponent = teams_map[f['team_a'] if is_home else f['team_h']]['short_name']
-            difficulty = f['team_h_difficulty'] if is_home else f['team_a_difficulty']
-            fdr_emoji = get_fdr_emoji(difficulty)
-            venue = "(H)" if is_home else "(A)"
-            fixture_lines.append(f"GW{f['event']}: vs {opponent} {venue} {fdr_emoji}")
-        
-        if fixture_lines:
-            embed.add_field(name=team_name, value="\n".join(fixture_lines), inline=False)
-        else:
-            embed.description = f"No upcoming fixtures found for {team_name} in the next 4 gameweeks."
+        # Specific team: show next 10 fixtures (including BGWs)
+        team_upcoming = [
+            f for f in fixtures_data
+            if f.get('event') and f['event'] >= current_gw
+               and (f['team_h'] == team_id_to_show or f['team_a'] == team_id_to_show)
+        ]
+        team_upcoming.sort(key=lambda x: x['event'])
+        team_upcoming = team_upcoming[:10]
 
-    else: # All teams
-        fixtures_by_team = {team_id: [] for team_id in teams_map}
-        for f in upcoming_fixtures:
-            gw_str = f"GW{f['event']}"
+        team_name = teams_map[team_id_to_show]['name']
+        fixture_lines = []
+        if team_upcoming:
+            # Find all GWs in the range to detect blanks
+            team_fixture_gws = {f['event'] for f in team_upcoming}
+            min_gw = current_gw
+            max_gw = team_upcoming[-1]['event']
+
+            fixture_idx = 0
+            for gw in range(min_gw, max_gw + 1):
+                if gw in team_fixture_gws:
+                    f = team_upcoming[fixture_idx]
+                    fixture_idx += 1
+                    is_home = f['team_h'] == team_id_to_show
+                    opponent = teams_map[f['team_a'] if is_home else f['team_h']]['short_name']
+                    difficulty = f['team_h_difficulty'] if is_home else f['team_a_difficulty']
+                    fdr_emoji = get_fdr_emoji(difficulty)
+                    venue = "(H)" if is_home else "(A)"
+                    fixture_lines.append(f"{f'GW{gw}':<5} {opponent}{venue} {fdr_emoji}")
+                else:
+                    fixture_lines.append(f"{f'GW{gw}':<5} BGW    ⛔")
+
+        if fixture_lines:
+            value_string = "```\n" + "\n".join(fixture_lines) + "\n```"
+            embed.add_field(name=team_name, value=value_string, inline=False)
+        else:
+            embed.add_field(name=teams_map[team_id_to_show]['name'], value="No upcoming fixtures found.", inline=False)
+
+    else: # All teams — next 5 GWs (showing BGWs)
+        all_upcoming = sorted(
+            [f for f in fixtures_data if f.get('event') and f['event'] >= current_gw],
+            key=lambda x: x['event']
+        )
+
+        # Build per-team fixture map: team_id -> { gw: fixture_line }
+        team_gw_fixtures = {team_id: {} for team_id in teams_map}
+        for f in all_upcoming:
+            gw = f['event']
+            gw_str = f"GW{gw}"
             # Home team
-            h_opponent = teams_map[f['team_a']]['short_name']
-            h_fdr = get_fdr_emoji(f['team_h_difficulty'])
-            fixtures_by_team[f['team_h']].append(f"{gw_str:<5} {h_opponent}(H) {h_fdr}")
+            if gw not in team_gw_fixtures[f['team_h']]:
+                h_opponent = teams_map[f['team_a']]['short_name']
+                h_fdr = get_fdr_emoji(f['team_h_difficulty'])
+                team_gw_fixtures[f['team_h']][gw] = f"{gw_str:<5} {h_opponent}(H) {h_fdr}"
             # Away team
-            a_opponent = teams_map[f['team_h']]['short_name']
-            a_fdr = get_fdr_emoji(f['team_a_difficulty'])
-            fixtures_by_team[f['team_a']].append(f"{gw_str:<5} {a_opponent}(A) {a_fdr}")
+            if gw not in team_gw_fixtures[f['team_a']]:
+                a_opponent = teams_map[f['team_h']]['short_name']
+                a_fdr = get_fdr_emoji(f['team_a_difficulty'])
+                team_gw_fixtures[f['team_a']][gw] = f"{gw_str:<5} {a_opponent}(A) {a_fdr}"
+
+        # Determine the 5 GW window
+        gw_range = list(range(current_gw, current_gw + 5))
 
         # Create a list of fields to be added
         fields_to_add = []
         for team_id, team_data in sorted(teams_map.items(), key=lambda x: x[1]['name']):
-            if fixtures_by_team[team_id]:
-                # Sort this team's fixtures by gameweek
-                sorted_fixtures = sorted(fixtures_by_team[team_id], key=lambda x: int(x.split()[0][2:]))
-                value_string = "```\n" + "\n".join(sorted_fixtures) + "\n```"
-                fields_to_add.append({'name': team_data['name'], 'value': value_string, 'inline': True})
+            lines = []
+            for gw in gw_range:
+                if gw in team_gw_fixtures[team_id]:
+                    lines.append(team_gw_fixtures[team_id][gw])
+                else:
+                    lines.append(f"{f'GW{gw}':<5} BGW    ⛔")
+            value_string = "```\n" + "\n".join(lines) + "\n```"
+            fields_to_add.append({'name': team_data['name'], 'value': value_string, 'inline': True})
         
         # Add fields in chunks of 3 to ensure alignment
         for i in range(0, len(fields_to_add), 3):
