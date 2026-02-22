@@ -545,3 +545,253 @@ def generate_dreamteam_image(fpl_data, summary_data):
     background.convert("RGB").save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
     return img_byte_arr
+
+
+# =====================================================
+# LEAGUE TABLE IMAGE
+# =====================================================
+
+# Colors matching the website's editorial theme
+TABLE_BG = "#FFFFFF"
+TABLE_HEADER_BG = "#F5F5F4"       # editorial-bg
+TABLE_BORDER = "#E5E5E4"          # border-light
+TABLE_TEXT_BLACK = "#171717"       # ink-black
+TABLE_TEXT_MUTED = "#737373"       # ink-muted
+TABLE_GW_BLUE = "#2563EB"         # blue-600
+TABLE_RANK_UP = "#059669"         # green
+TABLE_RANK_DOWN = "#DC2626"       # red
+TABLE_CARD_RADIUS = 16
+
+# Chip badge colors (matching ChipBadge.tsx)
+CHIP_COLORS = {
+    'wildcard': ('#8B5CF6', 'WC'),
+    'freehit':  ('#3B82F6', 'FH'),
+    'bboost':   ('#10B981', 'BB'),
+    '3xc':      ('#F59E0B', 'TC'),
+}
+
+# Font paths
+FONT_REGULAR = "Geist-Regular.otf"
+FONT_SEMIBOLD = "Geist-SemiBold.otf"
+FONT_BOLD = "Geist-Bold.otf"
+
+
+def _draw_rounded_rect(draw, bbox, radius, fill=None, outline=None, width=1):
+    """Draw a rounded rectangle with optional outline."""
+    if fill:
+        draw.rounded_rectangle(bbox, radius=radius, fill=fill)
+    if outline:
+        draw.rounded_rectangle(bbox, radius=radius, outline=outline, width=width)
+
+
+def _draw_chip_badge(img, draw, cx, cy, chip_key, size=22):
+    """Draw a colored chip badge circle centered at (cx, cy)."""
+    config = CHIP_COLORS.get(chip_key)
+    if not config:
+        return
+    color, label = config
+
+    # Draw filled circle using supersampling for antialiasing
+    scale = 4
+    circle_img = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
+    circle_draw = ImageDraw.Draw(circle_img)
+    circle_draw.ellipse([0, 0, size * scale - 1, size * scale - 1], fill=color)
+    circle_img = circle_img.resize((size, size), Image.LANCZOS)
+
+    x = cx - size // 2
+    y = cy - size // 2
+    img.paste(circle_img, (x, y), circle_img)
+
+    # Draw label text
+    chip_font = ImageFont.truetype(FONT_BOLD, 11)
+    draw.text((cx, cy), label, font=chip_font, fill="white", anchor="mm")
+
+
+def _draw_rank_arrow(img, draw, cx, cy, direction, size=16):
+    """Draw a small colored circle with an up/down chevron arrow, antialiased."""
+    color = TABLE_RANK_UP if direction == 'up' else TABLE_RANK_DOWN
+
+    # Draw everything at 4x scale then downscale for clean antialiasing
+    scale = 4
+    s = size * scale  # 64px working size
+    arrow_img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    arrow_draw = ImageDraw.Draw(arrow_img)
+
+    # Circle
+    arrow_draw.ellipse([0, 0, s - 1, s - 1], fill=color)
+
+    # Chevron matching Lucide's ChevronUp/ChevronDown (strokeWidth=3, size=12 in 16px circle)
+    # Lucide chevron-up path in 24x24 viewbox: polyline points="18 15 12 9 6 15"
+    # Scale to our working size: center at s/2, icon spans ~60% of circle
+    mid = s // 2
+    span_x = int(s * 0.28)   # horizontal reach from center
+    span_y = int(s * 0.14)   # vertical reach from center
+    stroke = int(s * 0.14)   # thick stroke for visibility
+
+    # Offset chevron slightly within the circle for better visual centering
+    nudge = int(s * 0.06)  # ~1px at final size
+    if direction == 'up':
+        points = [(mid - span_x, mid + span_y - nudge), (mid, mid - span_y - nudge), (mid + span_x, mid + span_y - nudge)]
+    else:
+        points = [(mid - span_x, mid - span_y + nudge), (mid, mid + span_y + nudge), (mid + span_x, mid - span_y + nudge)]
+
+    arrow_draw.line(points, fill="white", width=stroke, joint="curve")
+    # Round the line caps by drawing circles at the endpoints
+    cap_r = stroke // 2
+    for pt in [points[0], points[2]]:
+        arrow_draw.ellipse([pt[0] - cap_r, pt[1] - cap_r, pt[0] + cap_r, pt[1] + cap_r], fill="white")
+
+    # Downscale with LANCZOS for smooth antialiasing
+    arrow_img = arrow_img.resize((size, size), Image.LANCZOS)
+
+    x = cx - size // 2
+    y = cy - size // 2
+    img.paste(arrow_img, (x, y), arrow_img)
+
+
+def generate_league_table_image(league_name, current_gw, managers, website_url=None):
+    """Generate a league table image matching the website's MiniLeagueTable style.
+
+    Args:
+        league_name: Name of the league
+        current_gw: Current gameweek number
+        managers: List of dicts sorted by live_total_points desc, each with:
+            - name: Player name
+            - team_name: FPL team name
+            - live_total_points: Total points including live GW
+            - final_gw_points: GW points
+            - picks_data: Picks dict with 'active_chip' key
+            - prev_rank: Previous rank (1-indexed), or None
+        website_url: Optional website URL for footer
+
+    Returns:
+        BytesIO PNG image or None
+    """
+    try:
+        # Fonts
+        header_font = ImageFont.truetype(FONT_BOLD, 16)
+        col_header_font = ImageFont.truetype(FONT_BOLD, 11)
+        name_font = ImageFont.truetype(FONT_SEMIBOLD, 14)
+        points_font = ImageFont.truetype(FONT_BOLD, 14)
+        gw_font = ImageFont.truetype(FONT_PATH, 14)
+        rank_font = ImageFont.truetype(FONT_PATH, 13)
+        footer_font = ImageFont.truetype(FONT_PATH, 11)
+    except Exception as e:
+        logger.error(f"Error loading fonts for league table: {e}")
+        return None
+
+    # Layout constants
+    padding_x = 20
+    row_height = 38
+    header_height = 48
+    col_header_height = 32
+    footer_height = 36
+    num_managers = len(managers)
+
+    # Column positions (x offsets from left)
+    col_rank_x = padding_x + 4
+    col_name_x = padding_x + 48
+    col_total_x = 340       # right-aligned
+    col_chip_x = 395        # center-aligned
+    col_gw_x = 450          # right-aligned
+    img_width = 480
+    img_height = header_height + col_header_height + (row_height * num_managers) + footer_height + 2
+
+    # Create image
+    img = Image.new("RGBA", (img_width, img_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Card background (sharp corners)
+    draw.rectangle([0, 0, img_width - 1, img_height - 1], fill=TABLE_BG, outline=TABLE_BORDER)
+
+    # Header section
+    draw.text((padding_x, (header_height - 16) // 2), league_name, font=header_font, fill=TABLE_TEXT_BLACK)
+
+    # Header border
+    header_bottom = header_height
+    draw.line([(0, header_bottom), (img_width, header_bottom)], fill=TABLE_BORDER, width=1)
+
+    # Column headers
+    col_y = header_bottom + (col_header_height - 11) // 2
+    draw.rectangle([0, header_bottom + 1, img_width, header_bottom + col_header_height], fill=TABLE_HEADER_BG)
+    draw.text((col_rank_x, col_y), "#", font=col_header_font, fill=TABLE_TEXT_MUTED)
+    draw.text((col_name_x, col_y), "MANAGER", font=col_header_font, fill=TABLE_TEXT_MUTED)
+    draw.text((col_total_x, col_y), "TOTAL", font=col_header_font, fill=TABLE_TEXT_MUTED, anchor="ra")
+    draw.text((col_chip_x, col_y), "CHIP", font=col_header_font, fill=TABLE_TEXT_MUTED, anchor="ma")
+    draw.text((col_gw_x, col_y), "GW", font=col_header_font, fill=TABLE_GW_BLUE, anchor="ra")
+
+    col_header_bottom = header_bottom + col_header_height
+    draw.line([(0, col_header_bottom), (img_width, col_header_bottom)], fill=TABLE_BORDER, width=1)
+
+    # Data rows
+    for i, manager in enumerate(managers):
+        row_y = col_header_bottom + (i * row_height)
+        row_center_y = row_y + row_height // 2
+
+        # Row divider (except first row)
+        if i > 0:
+            draw.line([(padding_x - 4, row_y), (img_width - padding_x + 4, row_y)], fill=TABLE_BORDER, width=1)
+
+        # Rank
+        rank = i + 1
+        draw.text((col_rank_x, row_center_y), str(rank), font=rank_font, fill=TABLE_TEXT_MUTED, anchor="lm")
+
+        # Rank movement arrow
+        prev_rank = manager.get('prev_rank')
+        if prev_rank and prev_rank != rank:
+            arrow_x = col_rank_x + 28
+            if rank < prev_rank:
+                _draw_rank_arrow(img, draw, arrow_x, row_center_y, 'up')
+            else:
+                _draw_rank_arrow(img, draw, arrow_x, row_center_y, 'down')
+
+        # Manager name (truncate if too long)
+        mgr_name = manager['name']
+        max_name_width = col_total_x - col_name_x - 40
+        name_bbox = draw.textbbox((0, 0), mgr_name, font=name_font)
+        if name_bbox[2] > max_name_width:
+            while len(mgr_name) > 3:
+                mgr_name = mgr_name[:-1]
+                bbox = draw.textbbox((0, 0), mgr_name + "...", font=name_font)
+                if bbox[2] <= max_name_width:
+                    mgr_name += "..."
+                    break
+        draw.text((col_name_x, row_center_y), mgr_name, font=name_font, fill=TABLE_TEXT_BLACK, anchor="lm")
+
+        # Total points
+        total_str = str(manager['live_total_points'])
+        draw.text((col_total_x, row_center_y), total_str, font=points_font, fill=TABLE_TEXT_BLACK, anchor="rm")
+
+        # Chip badge
+        active_chip = manager.get('picks_data', {}).get('active_chip')
+        if active_chip:
+            _draw_chip_badge(img, draw, col_chip_x, row_center_y, active_chip)
+        else:
+            draw.text((col_chip_x, row_center_y), "-", font=rank_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+
+        # GW points
+        gw_str = str(manager['final_gw_points'])
+        draw.text((col_gw_x, row_center_y), gw_str, font=gw_font, fill=TABLE_GW_BLUE, anchor="rm")
+
+    # Footer
+    footer_y = col_header_bottom + (num_managers * row_height)
+    draw.line([(0, footer_y), (img_width, footer_y)], fill=TABLE_BORDER, width=1)
+    footer_text = f"GW{current_gw} • livefplstats.com"
+    draw.text((img_width // 2, footer_y + footer_height // 2), footer_text,
+              font=footer_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+
+    # Gradient line at bottom (warm-yellow #FEBF04 -> deep-red #C21600, matching website)
+    gradient_height = 4
+    gradient_y = img_height - gradient_height
+    for x in range(img_width):
+        t = x / max(img_width - 1, 1)
+        r = int(0xFE + (0xC2 - 0xFE) * t)
+        g = int(0xBF + (0x16 - 0xBF) * t)
+        b = int(0x04 + (0x00 - 0x04) * t)
+        for dy in range(gradient_height):
+            img.putpixel((x, gradient_y + dy), (r, g, b, 255))
+
+    img_byte_arr = io.BytesIO()
+    img.convert("RGB").save(img_byte_arr, format='PNG', quality=95)
+    img_byte_arr.seek(0)
+    return img_byte_arr

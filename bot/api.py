@@ -29,7 +29,7 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
     picks_data = cached_picks.get(manager_id)
     history_data = cached_history.get(manager_id)
 
-    if not picks_data or not history_data:
+    if not picks_data:
         return None
 
     # --- Determine final GW points ---
@@ -151,11 +151,11 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
         final_gw_points = gw_points - transfer_cost
 
     # --- Calculate total points ---
-    pre_gw_total = 0
-    if current_gw > 1:
-        prev_gw_history = next((gw for gw in history_data['current'] if gw['event'] == current_gw - 1), None)
-        if prev_gw_history:
-            pre_gw_total = prev_gw_history['total_points']
+    # Use entry_history from picks data (same logic as the website):
+    # pre_gw_total = entry_history.total_points - entry_history.points
+    # This is the official total BEFORE this GW's points are added
+    entry_history = picks_data.get('entry_history', {})
+    pre_gw_total = entry_history.get('total_points', 0) - entry_history.get('points', 0)
 
     live_total_points = pre_gw_total + final_gw_points
 

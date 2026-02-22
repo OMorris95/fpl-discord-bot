@@ -879,47 +879,64 @@ async def table(interaction: discord.Interaction):
 
     manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
 
-    # --- Build Table String ---
+    TABLE_LIMIT = 25
+
+    # --- Compute previous rank from last GW standings ---
+    # league_data standings are ordered by last_rank (pre-live rank)
+    prev_rank_map = {}
+    for entry in league_data.get('standings', {}).get('results', []):
+        prev_rank_map[entry['entry']] = entry.get('last_rank', 0)
+
+    # Attach prev_rank to each manager detail
+    for manager in manager_details:
+        manager['prev_rank'] = prev_rank_map.get(manager['id'], 0)
+
+    # --- Generate image table ---
+    from bot.image_generator import generate_league_table_image
+
+    table_image = generate_league_table_image(
+        league_name=league_data['league']['name'],
+        current_gw=current_gw,
+        managers=manager_details[:TABLE_LIMIT],
+        website_url=WEBSITE_URL
+    )
+
+    if table_image:
+        import discord
+        file = discord.File(table_image, filename="league_table.png")
+        link_text = f"[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league?{league_id}>)"
+        await interaction.followup.send(content=link_text, file=file)
+    else:
+        # Fallback to text table if image generation fails
+        await _send_text_table(interaction, league_data, manager_details[:TABLE_LIMIT], current_gw, league_id)
+
+async def _send_text_table(interaction, league_data, manager_details, current_gw, league_id):
+    """Fallback text-based table if image generation fails."""
     def format_name(name):
         parts = name.split()
         if len(parts) >= 2:
             return f"{parts[0][0]}. {parts[-1]}"
         return name
 
-    TABLE_LIMIT = 25
-    
-    # Process manager names and find max length for padding
-    processed_managers = []
-    for i, manager in enumerate(manager_details[:TABLE_LIMIT]):
-        processed_managers.append({
+    processed = []
+    for i, m in enumerate(manager_details):
+        processed.append({
             'rank': i + 1,
-            'name': format_name(manager['name']),
-            'total': manager['live_total_points'],
-            'gw': manager['final_gw_points']
+            'name': format_name(m['name']),
+            'total': m['live_total_points'],
+            'gw': m['final_gw_points']
         })
-    
-    # Calculate padding length
-    max_len = 0
-    if processed_managers:
-        max_len = max(len(m['name']) for m in processed_managers)
 
-    # Build the table line by line
-    table_lines = []
-    header = f"**🏆 {league_data['league']['name']} - Live GW {current_gw} Table 🏆**"
-    table_lines.append("```")
-    # Header for the code block
-    table_lines.append(f"{'#':<3} {'Manager'.ljust(max_len)}  {'GW':>4}  {'Total':>6}")
-    table_lines.append("-" * (max_len + 18))
+    max_len = max((len(m['name']) for m in processed), default=10)
+    lines = ["```"]
+    lines.append(f"{'#':<3} {'Manager'.ljust(max_len)}  {'GW':>4}  {'Total':>6}")
+    lines.append("-" * (max_len + 18))
+    for m in processed:
+        lines.append(f"{str(m['rank']):<3} {m['name'].ljust(max_len)}  {m['gw']:>4}  {m['total']:>6}")
+    lines.append("```")
+    lines.append(f"[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league?{league_id}>)")
+    await interaction.followup.send("\n".join(lines))
 
-    for m in processed_managers:
-        padded_name = m['name'].ljust(max_len)
-        table_lines.append(f"{str(m['rank']):<3} {padded_name}  {m['gw']:>4}  {m['total']:>6}")
-
-    table_lines.append("```")
-
-    table_lines.append(f"[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league?{league_id}>)")
-
-    await interaction.followup.send("\n".join(table_lines))
 
 @bot.tree.command(name="player", description="Shows which managers in the league own a specific player.")
 @app_commands.describe(player="Select the player to check ownership for.")
