@@ -1156,13 +1156,7 @@ def generate_recap_image(gw_number, league_name, shame_data, praise_data):
             names = [d['manager_name'] for d in data]
             unique_players = list(dict.fromkeys(d.get('player_name', '') for d in data if d.get('player_name')))
             player_str = ", ".join(unique_players)
-            if 'captain' in category.lower() and player_str:
-                detail = f"(C) {player_str}"
-            elif 'transfer' in category.lower() and player_str:
-                prefix = "Sold" if 'flop' in category.lower() else "Bought"
-                detail = f"{prefix} {player_str}"
-            else:
-                detail = player_str
+            detail = player_str
             value_str = f"{data[0]['value']} pts"
             name_rows = math.ceil(len(names) / 2)
             card_h = base_card_height + max(0, name_rows - 1) * row_line_h
