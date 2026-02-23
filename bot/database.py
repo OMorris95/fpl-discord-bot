@@ -55,13 +55,27 @@ def init_database():
                 transfer_alerts_enabled BOOLEAN NOT NULL DEFAULT 0
             )
         """)
-        # This handles migration for older versions that didn't have the new column
+        # Migrations for goal_subscriptions columns
         cur.execute("PRAGMA table_info(goal_subscriptions)")
         columns = [row[1] for row in cur.fetchall()]
         if 'transfer_alerts_enabled' not in columns:
             logger.info("Migrating goal_subscriptions table for transfer alerts...")
             cur.execute("ALTER TABLE goal_subscriptions ADD COLUMN transfer_alerts_enabled BOOLEAN NOT NULL DEFAULT 0")
             logger.info("Migration complete.")
+        if 'auto_post_gw' not in columns:
+            logger.info("Migrating goal_subscriptions table for auto-post support...")
+            cur.execute("ALTER TABLE goal_subscriptions ADD COLUMN auto_post_gw BOOLEAN NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE goal_subscriptions ADD COLUMN auto_post_recap BOOLEAN NOT NULL DEFAULT 0")
+            logger.info("Migration complete.")
+
+        # Bot state table (persists auto-post tracking across restarts)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_state (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
         # Create indexes for frequently queried columns
         cur.execute("CREATE INDEX IF NOT EXISTS idx_league_teams_league_id ON league_teams(league_id)")
@@ -288,3 +302,81 @@ def set_transfer_alert_subscription(channel_id: int, status: bool):
     except sqlite3.Error as e:
         logger.error(f"Database error in set_transfer_alert_subscription: {e}")
         raise
+
+
+def get_auto_post_subscriptions(post_type='gw'):
+    """Gets channels with auto-posting enabled for the given type ('gw' or 'recap')."""
+    column = 'auto_post_gw' if post_type == 'gw' else 'auto_post_recap'
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+            cur.execute(f"SELECT channel_id, league_id FROM goal_subscriptions WHERE {column} = 1")
+            return cur.fetchall()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in get_auto_post_subscriptions: {e}")
+        return []
+
+
+def is_auto_post_enabled(channel_id: int, post_type: str):
+    """Checks if auto-posting is enabled for a channel."""
+    column = 'auto_post_gw' if post_type == 'gw' else 'auto_post_recap'
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.cursor()
+            cur.execute(f"SELECT {column} FROM goal_subscriptions WHERE channel_id = ?", (str(channel_id),))
+            result = cur.fetchone()
+            return result[0] if result and result[0] else False
+    except sqlite3.Error as e:
+        logger.error(f"Database error in is_auto_post_enabled: {e}")
+        return False
+
+
+def set_auto_post_subscription(channel_id: int, post_type: str, enabled: bool):
+    """Enable/disable auto-posting for a channel."""
+    column = 'auto_post_gw' if post_type == 'gw' else 'auto_post_recap'
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.cursor()
+            cur.execute(f"UPDATE goal_subscriptions SET {column} = ? WHERE channel_id = ?", (enabled, str(channel_id)))
+            con.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in set_auto_post_subscription: {e}")
+        raise
+
+
+def get_bot_state(key: str):
+    """Gets a bot state value by key."""
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.cursor()
+            cur.execute("SELECT value FROM bot_state WHERE key = ?", (key,))
+            result = cur.fetchone()
+            return result[0] if result else None
+    except sqlite3.Error as e:
+        logger.error(f"Database error in get_bot_state: {e}")
+        return None
+
+
+def set_bot_state(key: str, value: str):
+    """Sets a bot state value (upsert)."""
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.cursor()
+            cur.execute("INSERT OR REPLACE INTO bot_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)", (key, value))
+            con.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in set_bot_state: {e}")
+        raise
+
+
+def get_all_bot_state_keys(prefix: str):
+    """Gets all state keys starting with a prefix."""
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.cursor()
+            cur.execute("SELECT key FROM bot_state WHERE key LIKE ?", (f"{prefix}%",))
+            return [row[0] for row in cur.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Database error in get_all_bot_state_keys: {e}")
+        return []

@@ -795,3 +795,365 @@ def generate_league_table_image(league_name, current_gw, managers, website_url=N
     img.convert("RGB").save(img_byte_arr, format='PNG', quality=95)
     img_byte_arr.seek(0)
     return img_byte_arr
+
+
+# =====================================================
+# GW SUMMARY IMAGE (captains + transfers)
+# =====================================================
+
+def _draw_section_header(draw, y, text, color, img_width, padding_x=16):
+    """Draw a section header bar with colored text."""
+    font = ImageFont.truetype(FONT_BOLD, 12)
+    draw.rectangle([0, y, img_width, y + 24], fill=TABLE_HEADER_BG)
+    draw.line([(0, y), (img_width, y)], fill=TABLE_BORDER, width=1)
+    draw.text((padding_x, y + 6), text, font=font, fill=color)
+    draw.line([(0, y + 24), (img_width, y + 24)], fill=TABLE_BORDER, width=1)
+    return y + 24
+
+
+def _draw_count_badge(img, draw, x, y, count):
+    """Draw a small blue count badge at (x, y)."""
+    size = 16
+    scale = 4
+    badge = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
+    badge_draw = ImageDraw.Draw(badge)
+    badge_draw.ellipse([0, 0, size * scale - 1, size * scale - 1], fill=TABLE_GW_BLUE)
+    badge = badge.resize((size, size), Image.LANCZOS)
+    img.paste(badge, (x - size // 2, y - size // 2), badge)
+    badge_font = ImageFont.truetype(FONT_BOLD, 10)
+    draw.text((x, y), str(count), font=badge_font, fill="white", anchor="mm")
+
+
+def _draw_player_column(img, draw, cx, top_y, player_name, team_name, managers, fonts):
+    """Draw a single player column: jersey + name + manager list. Returns height used."""
+    jersey_h = 50
+    name_font, mgr_font = fonts
+
+    # Load and draw jersey
+    jersey = load_jersey_image(team_name, target_height=jersey_h)
+    if jersey:
+        paste_x = cx - jersey.width // 2
+        img.paste(jersey, (paste_x, top_y), jersey)
+        # Count badge in top-right corner of jersey
+        if len(managers) > 1:
+            _draw_count_badge(img, draw, paste_x + jersey.width - 2, top_y + 2, len(managers))
+
+    y = top_y + jersey_h + 2
+
+    # Player name (truncated)
+    display_name = player_name[:9] + "..." if len(player_name) > 9 else player_name
+    draw.text((cx, y), display_name, font=name_font, fill=TABLE_TEXT_BLACK, anchor="ma")
+    y += 16
+
+    # Manager names
+    for mgr in managers:
+        draw.text((cx, y), mgr, font=mgr_font, fill=TABLE_TEXT_MUTED, anchor="ma")
+        y += 13
+
+    return y - top_y
+
+
+def _draw_player_columns_section(img, draw, top_y, players_data, fonts, img_width=480, padding_x=16):
+    """Draw a row of player columns. Returns height used."""
+    if not players_data:
+        empty_font = ImageFont.truetype(FONT_PATH, 12)
+        draw.text((img_width // 2, top_y + 20), "None", font=empty_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+        return 40
+
+    num_cols = min(len(players_data), 5)
+    usable_width = img_width - 2 * padding_x
+    col_width = usable_width // num_cols
+
+    max_height = 0
+    for i, player in enumerate(players_data[:5]):
+        cx = padding_x + col_width // 2 + i * col_width
+        h = _draw_player_column(
+            img, draw, cx, top_y + 8,
+            player['player_name'], player['team_name'], player['managers'], fonts
+        )
+        max_height = max(max_height, h)
+
+    # If more than 5 players, draw second row
+    if len(players_data) > 5:
+        row2_y = top_y + 8 + max_height + 8
+        num_cols2 = min(len(players_data) - 5, 5)
+        col_width2 = usable_width // num_cols2
+        max_height2 = 0
+        for i, player in enumerate(players_data[5:10]):
+            cx = padding_x + col_width2 // 2 + i * col_width2
+            h = _draw_player_column(
+                img, draw, cx, row2_y,
+                player['player_name'], player['team_name'], player['managers'], fonts
+            )
+            max_height2 = max(max_height2, h)
+        return 8 + max_height + 8 + max_height2 + 12
+    else:
+        return 8 + max_height + 12
+
+
+def _format_short_name(name):
+    """Format name as 'F. Surname' to save space."""
+    parts = name.split()
+    if len(parts) >= 2:
+        return f"{parts[0][0]}. {parts[-1]}"
+    return name
+
+
+def generate_gw_summary_image(gw_number, league_name, captains_data, transfers_in_data, transfers_out_data):
+    """Generate a GW summary image showing captain choices and transfers.
+
+    Args:
+        gw_number: Gameweek number
+        league_name: League name string
+        captains_data: list of {player_name, team_name, managers: [str]} sorted by popularity
+        transfers_in_data: same format, top transfers in
+        transfers_out_data: same format, top transfers out
+
+    Returns:
+        BytesIO PNG image or None
+    """
+    try:
+        header_font = ImageFont.truetype(FONT_BOLD, 16)
+        league_font = ImageFont.truetype(FONT_PATH, 13)
+        name_font = ImageFont.truetype(FONT_SEMIBOLD, 12)
+        mgr_font = ImageFont.truetype(FONT_REGULAR, 10)
+        footer_font = ImageFont.truetype(FONT_PATH, 11)
+    except Exception as e:
+        logger.error(f"Error loading fonts for GW summary: {e}")
+        return None
+
+    img_width = 480
+    padding_x = 16
+    header_height = 48
+    footer_height = 36
+    fonts = (name_font, mgr_font)
+
+    # Pre-calculate section heights by drawing to a scratch image
+    scratch = Image.new("RGBA", (img_width, 2000), (0, 0, 0, 0))
+    scratch_draw = ImageDraw.Draw(scratch)
+
+    cap_height = _draw_player_columns_section(scratch, scratch_draw, 0, captains_data, fonts, img_width, padding_x)
+    tin_height = _draw_player_columns_section(scratch, scratch_draw, 0, transfers_in_data, fonts, img_width, padding_x)
+    tout_height = _draw_player_columns_section(scratch, scratch_draw, 0, transfers_out_data, fonts, img_width, padding_x)
+
+    # Total image height
+    img_height = header_height + 24 + cap_height + 24 + tin_height + 24 + tout_height + footer_height + 2
+
+    # Create real image
+    img = Image.new("RGBA", (img_width, img_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Background
+    draw.rectangle([0, 0, img_width - 1, img_height - 1], fill=TABLE_BG, outline=TABLE_BORDER)
+
+    # Header
+    draw.rectangle([0, 0, img_width, header_height], fill=TABLE_HEADER_BG)
+    draw.text((padding_x, (header_height - 16) // 2), f"Gameweek {gw_number} Summary", font=header_font, fill=TABLE_TEXT_BLACK)
+    # League name right-aligned
+    draw.text((img_width - padding_x, (header_height - 13) // 2), league_name, font=league_font, fill=TABLE_TEXT_MUTED, anchor="ra")
+    draw.line([(0, header_height), (img_width, header_height)], fill=TABLE_BORDER, width=1)
+
+    # Captain choices section
+    y = header_height
+    y = _draw_section_header(draw, y, "CAPTAIN CHOICES", TABLE_TEXT_MUTED, img_width, padding_x)
+    _draw_player_columns_section(img, draw, y, captains_data, fonts, img_width, padding_x)
+    y += cap_height
+
+    # Transfers in section
+    y = _draw_section_header(draw, y, "TRANSFERS IN", TABLE_RANK_UP, img_width, padding_x)
+    _draw_player_columns_section(img, draw, y, transfers_in_data, fonts, img_width, padding_x)
+    y += tin_height
+
+    # Transfers out section
+    y = _draw_section_header(draw, y, "TRANSFERS OUT", TABLE_RANK_DOWN, img_width, padding_x)
+    _draw_player_columns_section(img, draw, y, transfers_out_data, fonts, img_width, padding_x)
+    y += tout_height
+
+    # Footer
+    draw.line([(0, y), (img_width, y)], fill=TABLE_BORDER, width=1)
+    footer_text = f"GW{gw_number} • livefplstats.com"
+    draw.text((img_width // 2, y + footer_height // 2), footer_text, font=footer_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+
+    # Gradient bar
+    gradient_height = 4
+    gradient_y = img_height - gradient_height
+    for x in range(img_width):
+        t = x / max(img_width - 1, 1)
+        r = int(0xFE + (0xC2 - 0xFE) * t)
+        g = int(0xBF + (0x16 - 0xBF) * t)
+        b = int(0x04 + (0x00 - 0x04) * t)
+        for dy in range(gradient_height):
+            img.putpixel((x, gradient_y + dy), (r, g, b, 255))
+
+    img_byte_arr = io.BytesIO()
+    img.convert("RGB").save(img_byte_arr, format='PNG', quality=95)
+    img_byte_arr.seek(0)
+    return img_byte_arr
+
+
+# =====================================================
+# GW RECAP IMAGE (shame + praise)
+# =====================================================
+
+SHAME_BG = "#FEF2F2"    # subtle red
+PRAISE_BG = "#F0FDF4"   # subtle green
+
+
+def _draw_metric_card(draw, x, y, width, category, manager_name, detail, value_str, value_color, fonts):
+    """Draw a single metric card (rounded rect with category, manager, detail, value)."""
+    card_font_cat, card_font_name, card_font_detail, card_font_value = fonts
+    height = 56
+
+    # Card background
+    _draw_rounded_rect(draw, [x, y, x + width, y + height], 8, fill="#FFFFFF", outline=TABLE_BORDER)
+
+    # Category label (top-left)
+    draw.text((x + 16, y + 8), category, font=card_font_cat, fill=TABLE_TEXT_MUTED)
+
+    # Manager name (bottom-left)
+    draw.text((x + 16, y + 28), manager_name, font=card_font_name, fill=TABLE_TEXT_BLACK)
+
+    # Detail text (center-right area, if present)
+    if detail:
+        draw.text((x + width - 80, y + 28), detail, font=card_font_detail, fill=TABLE_TEXT_MUTED, anchor="ra")
+
+    # Value (far right)
+    draw.text((x + width - 16, y + 28), value_str, font=card_font_value, fill=value_color, anchor="ra")
+
+    return height
+
+
+def generate_recap_image(gw_number, league_name, shame_data, praise_data):
+    """Generate a GW recap image with shame and praise sections.
+
+    Args:
+        gw_number: Gameweek number
+        league_name: League name string
+        shame_data: dict with keys 'most_benched', 'worst_captain', 'transfer_flop'
+            each value: {manager_name, value, player_name (optional)}
+        praise_data: dict with keys 'highest_score', 'best_captain', 'best_transfer'
+            each value: {manager_name, value, player_name (optional)}
+
+    Returns:
+        BytesIO PNG image or None
+    """
+    try:
+        header_font = ImageFont.truetype(FONT_BOLD, 16)
+        league_font = ImageFont.truetype(FONT_PATH, 13)
+        section_font = ImageFont.truetype(FONT_BOLD, 13)
+        card_cat_font = ImageFont.truetype(FONT_SEMIBOLD, 11)
+        card_name_font = ImageFont.truetype(FONT_SEMIBOLD, 14)
+        card_detail_font = ImageFont.truetype(FONT_PATH, 13)
+        card_value_font = ImageFont.truetype(FONT_BOLD, 14)
+        footer_font = ImageFont.truetype(FONT_PATH, 11)
+    except Exception as e:
+        logger.error(f"Error loading fonts for recap: {e}")
+        return None
+
+    img_width = 480
+    padding_x = 20
+    header_height = 48
+    section_header_h = 28
+    card_height = 56
+    card_gap = 8
+    section_padding = 16
+    footer_height = 36
+    card_width = img_width - 2 * padding_x
+    card_fonts = (card_cat_font, card_name_font, card_detail_font, card_value_font)
+
+    # Fixed height: header + 2 sections (header + 3 cards + padding each) + footer
+    section_content_h = section_header_h + section_padding // 2 + 3 * card_height + 2 * card_gap + section_padding
+    img_height = header_height + section_content_h * 2 + footer_height + 2
+
+    img = Image.new("RGBA", (img_width, img_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Background
+    draw.rectangle([0, 0, img_width - 1, img_height - 1], fill=TABLE_BG, outline=TABLE_BORDER)
+
+    # Header
+    draw.rectangle([0, 0, img_width, header_height], fill=TABLE_HEADER_BG)
+    draw.text((padding_x, (header_height - 16) // 2), f"Gameweek {gw_number} Recap", font=header_font, fill=TABLE_TEXT_BLACK)
+    draw.text((img_width - padding_x, (header_height - 13) // 2), league_name, font=league_font, fill=TABLE_TEXT_MUTED, anchor="ra")
+    draw.line([(0, header_height), (img_width, header_height)], fill=TABLE_BORDER, width=1)
+
+    y = header_height
+
+    # --- SHAME SECTION ---
+    # Section background
+    shame_section_h = section_content_h
+    draw.rectangle([0, y, img_width, y + shame_section_h], fill=SHAME_BG)
+
+    # Section header
+    draw.text((img_width // 2, y + section_header_h // 2), "WALL OF SHAME", font=section_font, fill=TABLE_RANK_DOWN, anchor="mm")
+    y += section_header_h + section_padding // 2
+
+    # Shame metric definitions
+    shame_metrics = [
+        ('MOST POINTS BENCHED', shame_data.get('most_benched')),
+        ('WORST CAPTAIN', shame_data.get('worst_captain')),
+        ('BIGGEST TRANSFER FLOP', shame_data.get('transfer_flop')),
+    ]
+    for category, data in shame_metrics:
+        if data:
+            detail = f"(C) {data.get('player_name', '')}" if data.get('player_name') and 'captain' in category.lower() else data.get('player_name', '')
+            if category == 'BIGGEST TRANSFER FLOP' and data.get('player_name'):
+                detail = f"Sold {data['player_name']}"
+            value_str = f"{data['value']} pts"
+        else:
+            detail = ""
+            value_str = "No data"
+        manager = data['manager_name'] if data else "-"
+        _draw_metric_card(draw, padding_x, y, card_width, category, manager, detail, value_str, TABLE_RANK_DOWN, card_fonts)
+        y += card_height + card_gap
+
+    y = header_height + shame_section_h
+
+    # --- PRAISE SECTION ---
+    praise_section_h = section_content_h
+    draw.rectangle([0, y, img_width, y + praise_section_h], fill=PRAISE_BG)
+
+    # Section header
+    draw.text((img_width // 2, y + section_header_h // 2), "HALL OF FAME", font=section_font, fill=TABLE_RANK_UP, anchor="mm")
+    y += section_header_h + section_padding // 2
+
+    # Praise metric definitions
+    praise_metrics = [
+        ('HIGHEST GW SCORE', praise_data.get('highest_score')),
+        ('BEST CAPTAIN', praise_data.get('best_captain')),
+        ('BEST TRANSFER IN', praise_data.get('best_transfer')),
+    ]
+    for category, data in praise_metrics:
+        if data:
+            detail = f"(C) {data.get('player_name', '')}" if data.get('player_name') and 'captain' in category.lower() else data.get('player_name', '')
+            if category == 'BEST TRANSFER IN' and data.get('player_name'):
+                detail = f"Bought {data['player_name']}"
+            value_str = f"{data['value']} pts"
+        else:
+            detail = ""
+            value_str = "No data"
+        manager = data['manager_name'] if data else "-"
+        _draw_metric_card(draw, padding_x, y, card_width, category, manager, detail, value_str, TABLE_RANK_UP, card_fonts)
+        y += card_height + card_gap
+
+    # Footer
+    footer_y = header_height + shame_section_h + praise_section_h
+    draw.line([(0, footer_y), (img_width, footer_y)], fill=TABLE_BORDER, width=1)
+    draw.text((img_width // 2, footer_y + footer_height // 2), f"GW{gw_number} • livefplstats.com",
+              font=footer_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+
+    # Gradient bar
+    gradient_height = 4
+    gradient_y = img_height - gradient_height
+    for x in range(img_width):
+        t = x / max(img_width - 1, 1)
+        r = int(0xFE + (0xC2 - 0xFE) * t)
+        g = int(0xBF + (0x16 - 0xBF) * t)
+        b = int(0x04 + (0x00 - 0x04) * t)
+        for dy in range(gradient_height):
+            img.putpixel((x, gradient_y + dy), (r, g, b, 255))
+
+    img_byte_arr = io.BytesIO()
+    img.convert("RGB").save(img_byte_arr, format='PNG', quality=95)
+    img_byte_arr.seek(0)
+    return img_byte_arr
