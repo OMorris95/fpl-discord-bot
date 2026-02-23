@@ -32,8 +32,8 @@ NAME_BOX_COLOR = (0, 0, 0, 200)  # Black, mostly opaque
 
 # --- Glassmorphism Settings ---
 GLASS_PADDING_TOP = 8       # Padding above jersey inside glass card
-GLASS_BLUR_RADIUS = 10      # Gaussian blur radius
-GLASS_TINT = (0, 0, 0, 60)  # ~24% opacity black (lighter to match website)
+GLASS_BLUR_RADIUS = 8       # Gaussian blur radius (matches website backdrop-filter: blur(8px))
+GLASS_TINT = (255, 255, 255, 65)  # White tint (~25% opacity, matches website light glass look)
 GLASS_CORNER_RADIUS = 10    # Rounded top corners
 
 
@@ -366,13 +366,36 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
 
     # Header bar
     hdr_font = ImageFont.truetype(FONT_BOLD, 22)
-    hdr_detail_font = ImageFont.truetype(FONT_PATH, 18)
+    hdr_detail_font = ImageFont.truetype(FONT_PATH, 20)
+    chip_font = ImageFont.truetype(FONT_BOLD, 12)
     canvas_draw.rectangle([0, 0, pitch_w, hdr_height], fill=TABLE_HEADER_BG)
     team_name_text = summary_data.get('team_name', 'My Team')
     canvas_draw.text((10, (hdr_height - 22) // 2), team_name_text, font=hdr_font, fill=TABLE_TEXT_BLACK)
-    gw_num = fpl_data['live'].get('gw', '')
-    detail_text = f"GW{gw_num}: {summary_data['gw_points']} pts  \u2022  Total: {summary_data['total_points']}"
-    canvas_draw.text((pitch_w - 10, (hdr_height - 18) // 2), detail_text, font=hdr_detail_font, fill="#525252", anchor="ra")
+
+    # Chip badge between team name and points
+    active_chip = fpl_data['picks'].get('active_chip')
+    chip_right_edge = pitch_w - 10  # where points text will anchor from
+    detail_text = f"{summary_data['gw_points']} pts  \u2022  Total: {summary_data['total_points']}"
+    canvas_draw.text((chip_right_edge, (hdr_height - 20) // 2), detail_text, font=hdr_detail_font, fill="#525252", anchor="ra")
+
+    if active_chip and active_chip in CHIP_COLORS:
+        chip_bg, chip_label = CHIP_COLORS[active_chip]
+        # Circular badge right after team name
+        name_bbox = canvas_draw.textbbox((10, 0), team_name_text, font=hdr_font)
+        name_right = name_bbox[2]
+        chip_diameter = 30
+        chip_x = name_right + 8
+        chip_y = (hdr_height - chip_diameter) // 2
+        # Anti-aliased circle via supersampling
+        scale = 4
+        circle_img = Image.new("RGBA", (chip_diameter * scale, chip_diameter * scale), (0, 0, 0, 0))
+        circle_draw = ImageDraw.Draw(circle_img)
+        circle_draw.ellipse([0, 0, chip_diameter * scale - 1, chip_diameter * scale - 1], fill=chip_bg)
+        circle_img = circle_img.resize((chip_diameter, chip_diameter), Image.LANCZOS)
+        canvas.paste(circle_img, (chip_x, chip_y), circle_img)
+        chip_label_font = ImageFont.truetype(FONT_BOLD, 13)
+        canvas_draw.text((chip_x + chip_diameter // 2, chip_y + chip_diameter // 2), chip_label,
+                         font=chip_label_font, fill="white", anchor="mm")
     canvas_draw.line([(0, hdr_height), (pitch_w, hdr_height)], fill=TABLE_BORDER, width=1)
 
     # Paste pitch
@@ -381,6 +404,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
     # Footer
     footer_y = hdr_height + pitch_h
     ftr_font = ImageFont.truetype(FONT_PATH, 16)
+    gw_num = fpl_data['live'].get('gw', '')
     canvas_draw.line([(0, footer_y), (pitch_w, footer_y)], fill=TABLE_BORDER, width=1)
     footer_text = f"GW{gw_num} \u2022 livefplstats.com"
     canvas_draw.text((pitch_w // 2, footer_y + ftr_height // 2), footer_text,
@@ -606,6 +630,17 @@ FONT_REGULAR = "Geist-Regular.otf"
 FONT_SEMIBOLD = "Geist-SemiBold.otf"
 FONT_BOLD = "Geist-Bold.otf"
 
+# FDR colors — exact match to website CSS (theme-variables.css)
+FDR_COLORS = {
+    1: ("#2c6f00", "#FFFFFF"),  # dark green bg, white text
+    2: ("#01fc7a", "#000000"),  # bright green bg, black text
+    3: ("#cdcdcd", "#000000"),  # light grey bg, black text
+    4: ("#ff3030", "#FFFFFF"),  # bright red bg, white text
+    5: ("#c40000", "#FFFFFF"),  # dark red bg, white text
+}
+FDR_BGW = ("#6B7280", "#FFFFFF")  # gray-500 bg, white text
+POSITION_MAP = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
+
 
 def _draw_rounded_rect(draw, bbox, radius, fill=None, outline=None, width=1):
     """Draw a rounded rectangle with optional outline."""
@@ -700,7 +735,7 @@ def generate_league_table_image(league_name, current_gw, managers, website_url=N
     """
     try:
         # Fonts
-        header_font = ImageFont.truetype(FONT_BOLD, 16)
+        header_font = ImageFont.truetype(FONT_BOLD, 18)
         col_header_font = ImageFont.truetype(FONT_BOLD, 11)
         name_font = ImageFont.truetype(FONT_SEMIBOLD, 14)
         points_font = ImageFont.truetype(FONT_BOLD, 14)
@@ -736,7 +771,7 @@ def generate_league_table_image(league_name, current_gw, managers, website_url=N
     draw.rectangle([0, 0, img_width - 1, img_height - 1], fill=TABLE_BG, outline=TABLE_BORDER)
 
     # Header section
-    draw.text((padding_x, (header_height - 16) // 2), league_name, font=header_font, fill=TABLE_TEXT_BLACK)
+    draw.text((padding_x, (header_height - 18) // 2), league_name, font=header_font, fill=TABLE_TEXT_BLACK)
 
     # Header border
     header_bottom = header_height
@@ -1188,3 +1223,515 @@ def generate_recap_image(gw_number, league_name, shame_data, praise_data):
     img.convert("RGB").save(img_byte_arr, format='PNG', quality=95)
     img_byte_arr.seek(0)
     return img_byte_arr
+
+
+# =====================================================
+# Helper: draw standard footer + gradient bar
+# =====================================================
+
+def _draw_footer(draw, img, img_width, footer_y, footer_height, current_gw, font_size=13):
+    """Draw the standard footer bar with gradient at the bottom."""
+    draw.line([(0, footer_y), (img_width, footer_y)], fill=TABLE_BORDER, width=1)
+    ftr_font = ImageFont.truetype(FONT_PATH, font_size)
+    footer_text = f"GW{current_gw} • livefplstats.com"
+    draw.text((img_width // 2, footer_y + footer_height // 2), footer_text,
+              font=ftr_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+
+    gradient_height = 4
+    gradient_y = footer_y + footer_height - gradient_height
+    for x in range(img_width):
+        t = x / max(img_width - 1, 1)
+        r = int(0xFE + (0xC2 - 0xFE) * t)
+        g = int(0xBF + (0x16 - 0xBF) * t)
+        b = int(0x04 + (0x00 - 0x04) * t)
+        for dy in range(gradient_height):
+            img.putpixel((x, footer_y + footer_height - gradient_height + dy), (r, g, b, 255))
+
+
+def _draw_fdr_legend(draw, y, img_width, center=True):
+    """Draw the FDR color legend: Easy [1][2][3][4][5] Hard  BGW Blank"""
+    label_font = ImageFont.truetype(FONT_PATH, 13)
+    num_font = ImageFont.truetype(FONT_SEMIBOLD, 13)
+
+    box_w, box_h = 32, 24
+    gap = 5
+    total_boxes_w = 5 * box_w + 4 * gap
+
+    easy_text_w = draw.textlength("Easy", font=label_font)
+    hard_text_w = draw.textlength("Hard", font=label_font)
+    bgw_text_w = draw.textlength("Blank", font=label_font)
+    bgw_box_w = 44
+    total_w = easy_text_w + 8 + total_boxes_w + 8 + hard_text_w + 20 + bgw_box_w + 6 + bgw_text_w
+    start_x = (img_width - total_w) // 2 if center else 16
+
+    text_y = y + (box_h // 2)
+
+    # "Easy" label
+    draw.text((start_x, text_y), "Easy", font=label_font, fill=TABLE_TEXT_MUTED, anchor="lm")
+    x = start_x + int(easy_text_w) + 8
+
+    # 5 FDR boxes
+    for fdr in range(1, 6):
+        bg_color, text_color = FDR_COLORS[fdr]
+        draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=3, fill=bg_color)
+        draw.text((x + box_w // 2, y + box_h // 2), str(fdr),
+                  font=num_font, fill=text_color, anchor="mm")
+        x += box_w + gap
+
+    # "Hard" label
+    x -= gap
+    x += 8
+    draw.text((x, text_y), "Hard", font=label_font, fill=TABLE_TEXT_MUTED, anchor="lm")
+    x += int(hard_text_w) + 20
+
+    # BGW indicator (wider box to fit "BGW" text)
+    bgw_box_w = 44
+    bgw_bg, bgw_text = FDR_BGW
+    draw.rounded_rectangle([x, y, x + bgw_box_w, y + box_h], radius=3, fill=bgw_bg)
+    draw.text((x + bgw_box_w // 2, y + box_h // 2), "BGW",
+              font=num_font, fill=bgw_text, anchor="mm")
+    x += bgw_box_w + 6
+    draw.text((x, text_y), "Blank", font=label_font, fill=TABLE_TEXT_MUTED, anchor="lm")
+
+
+# =====================================================
+# Player Ownership Image
+# =====================================================
+
+def generate_player_ownership_image(player_info, team_info, current_gw,
+                                     gw_history, owners, benched):
+    """Generate a 480px-wide player ownership image."""
+    try:
+        img_width = 480
+        padding_x = 16
+        header_height = 48
+        section_header_h = 28
+        row_h = 28
+        footer_height = 36
+
+        # --- Calculate dynamic height ---
+        # Must exactly match y increments in drawing code below
+        jersey_h = 80
+        player_section_h = 16 + jersey_h + 6 + 20 + 4 + 16 + 4 + 16  # top_pad through total_pts
+        gw_row_h = 2 + 14 + 32 + 12  # gap + labels + boxes + bottom_pad
+        import math
+        owned_rows = math.ceil(len(owners) / 2) if owners else 0
+        benched_rows = math.ceil(len(benched) / 2) if benched else 0
+        owned_section_h = (section_header_h + owned_rows * row_h) if owners else 0
+        benched_section_h = (section_header_h + benched_rows * row_h) if benched else 0
+        no_owners_h = 40 if (not owners and not benched) else 0
+
+        total_height = (header_height + player_section_h + gw_row_h +
+                        owned_section_h + benched_section_h + no_owners_h +
+                        footer_height)
+
+        img = Image.new("RGBA", (img_width, total_height), TABLE_BG)
+        draw = ImageDraw.Draw(img)
+
+        # --- Header ---
+        draw.rectangle([0, 0, img_width, header_height], fill=TABLE_HEADER_BG)
+        hdr_font = ImageFont.truetype(FONT_BOLD, 16)
+        hdr_detail_font = ImageFont.truetype(FONT_PATH, 13)
+        draw.text((padding_x, header_height // 2), "Player Ownership",
+                  font=hdr_font, fill=TABLE_TEXT_BLACK, anchor="lm")
+        draw.text((img_width - padding_x, header_height // 2), f"GW{current_gw}",
+                  font=hdr_detail_font, fill=TABLE_TEXT_MUTED, anchor="rm")
+        draw.line([(0, header_height), (img_width, header_height)], fill=TABLE_BORDER, width=1)
+
+        y = header_height + 16
+
+        # --- Jersey ---
+        team_name = team_info.get('name', '')
+        is_gk = player_info.get('element_type') == 1
+        jersey = load_jersey_image(team_name, is_gk, target_height=jersey_h)
+        if jersey:
+            paste_x = (img_width - jersey.width) // 2
+            img.paste(jersey, (paste_x, y), jersey)
+        y += jersey_h + 6
+
+        # --- Player name ---
+        name_font = ImageFont.truetype(FONT_BOLD, 17)
+        player_name = f"{player_info.get('first_name', '')} {player_info.get('second_name', '')}"
+        draw.text((img_width // 2, y), player_name,
+                  font=name_font, fill=TABLE_TEXT_BLACK, anchor="ma")
+        y += 20 + 4
+
+        # --- Club + Position ---
+        detail_font = ImageFont.truetype(FONT_PATH, 13)
+        position = POSITION_MAP.get(player_info.get('element_type', 0), "")
+        club_pos_text = f"{team_name}  •  {position}"
+        draw.text((img_width // 2, y), club_pos_text,
+                  font=detail_font, fill=TABLE_TEXT_MUTED, anchor="ma")
+        y += 16 + 4
+
+        # --- Total points ---
+        pts_font = ImageFont.truetype(FONT_SEMIBOLD, 14)
+        total_pts = player_info.get('total_points', 0)
+        draw.text((img_width // 2, y), f"Total Points: {total_pts}",
+                  font=pts_font, fill=TABLE_TEXT_BLACK, anchor="ma")
+        y += 16
+
+        # --- Last 5 GW history boxes ---
+        y += 2
+        gw_label_font = ImageFont.truetype(FONT_REGULAR, 10)
+        gw_pts_font = ImageFont.truetype(FONT_SEMIBOLD, 13)
+        box_w, box_h = 52, 32
+        box_gap = 6
+        total_row_w = 5 * box_w + 4 * box_gap
+        start_x = (img_width - total_row_w) // 2
+
+        history_entries = list(gw_history[-5:]) if gw_history else []
+        while len(history_entries) < 5:
+            history_entries.insert(0, None)
+
+        for i, entry in enumerate(history_entries):
+            bx = start_x + i * (box_w + box_gap)
+            if entry:
+                gw_label = f"GW{entry.get('round', '?')}"
+                pts_text = str(entry.get('total_points', 0))
+            else:
+                gw_label = "-"
+                pts_text = "-"
+
+            draw.text((bx + box_w // 2, y), gw_label,
+                      font=gw_label_font, fill=TABLE_TEXT_MUTED, anchor="ma")
+            by = y + 14
+            draw.rounded_rectangle([bx, by, bx + box_w, by + box_h],
+                                   radius=4, fill=TABLE_HEADER_BG)
+            pts_color = TABLE_TEXT_BLACK if entry else TABLE_TEXT_MUTED
+            draw.text((bx + box_w // 2, by + box_h // 2), pts_text,
+                      font=gw_pts_font, fill=pts_color, anchor="mm")
+
+        y += 14 + box_h + 12
+
+        # --- Ownership sections ---
+        def draw_section(label, names, color, y_pos):
+            draw.rectangle([0, y_pos, img_width, y_pos + section_header_h],
+                           fill=TABLE_HEADER_BG)
+            draw.line([(0, y_pos), (img_width, y_pos)], fill=TABLE_BORDER, width=1)
+            sec_font = ImageFont.truetype(FONT_BOLD, 11)
+            draw.text((padding_x, y_pos + section_header_h // 2),
+                      f"{label} ({len(names)})",
+                      font=sec_font, fill=color, anchor="lm")
+            draw.line([(0, y_pos + section_header_h), (img_width, y_pos + section_header_h)],
+                      fill=TABLE_BORDER, width=1)
+            y_pos += section_header_h
+
+            row_font = ImageFont.truetype(FONT_SEMIBOLD, 13)
+            rank_font = ImageFont.truetype(FONT_PATH, 12)
+            col_w = img_width // 2
+            max_name_w = col_w - padding_x - 40
+
+            # Two-column layout
+            num_rows = math.ceil(len(names) / 2)
+            for row_idx in range(num_rows):
+                row_center = y_pos + row_h // 2
+                for col in range(2):
+                    idx = row_idx * 2 + col
+                    if idx >= len(names):
+                        break
+                    name = names[idx]
+                    col_x = col * col_w + padding_x
+                    draw.text((col_x + 8, row_center), f"{idx + 1}.",
+                              font=rank_font, fill=TABLE_TEXT_MUTED, anchor="lm")
+                    display_name = name
+                    while draw.textlength(display_name, font=row_font) > max_name_w and len(display_name) > 3:
+                        display_name = display_name[:-1]
+                    if display_name != name:
+                        display_name += "..."
+                    draw.text((col_x + 32, row_center), display_name,
+                              font=row_font, fill=TABLE_TEXT_BLACK, anchor="lm")
+                y_pos += row_h
+                if row_idx < num_rows - 1:
+                    draw.line([(padding_x, y_pos), (img_width - padding_x, y_pos)],
+                              fill=TABLE_BORDER, width=1)
+            return y_pos
+
+        if owners:
+            y = draw_section("OWNED BY", owners, TABLE_GW_BLUE, y)
+        if benched:
+            y = draw_section("BENCHED BY", benched, TABLE_TEXT_MUTED, y)
+        if not owners and not benched:
+            no_own_font = ImageFont.truetype(FONT_PATH, 14)
+            draw.text((img_width // 2, y + 20),
+                      "Not owned by any managers in the league",
+                      font=no_own_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+            y += 40
+
+        # --- Footer ---
+        _draw_footer(draw, img, img_width, y, footer_height, current_gw, font_size=13)
+
+        img_byte_arr = io.BytesIO()
+        img.convert("RGB").save(img_byte_arr, format='PNG', quality=95)
+        img_byte_arr.seek(0)
+        return img_byte_arr
+
+    except Exception as e:
+        logger.error(f"Error generating player ownership image: {e}", exc_info=True)
+        return None
+
+
+# =====================================================
+# Fixtures — Single Team Image
+# =====================================================
+
+def generate_fixtures_single_image(team_info, fixtures, current_gw):
+    """Generate a 520px-wide single-team fixtures image."""
+    try:
+        from collections import OrderedDict
+
+        img_width = 440
+        padding_x = 16
+        header_height = 52
+        legend_height = 36
+        col_header_h = 34
+        row_h = 36
+        footer_height = 36
+        fdr_bar_w = 80
+        fdr_bar_h = 26
+
+        # Group fixtures by GW for DGW handling
+        gw_groups = OrderedDict()
+        for f in fixtures:
+            gw = f['gw']
+            if gw not in gw_groups:
+                gw_groups[gw] = []
+            gw_groups[gw].append(f)
+
+        num_rows = len(gw_groups)
+        total_height = header_height + legend_height + col_header_h + (num_rows * row_h) + footer_height
+
+        img = Image.new("RGBA", (img_width, total_height), TABLE_BG)
+        draw = ImageDraw.Draw(img)
+
+        # --- Header ---
+        draw.rectangle([0, 0, img_width, header_height], fill=TABLE_HEADER_BG)
+        hdr_font = ImageFont.truetype(FONT_BOLD, 18)
+        hdr_detail_font = ImageFont.truetype(FONT_PATH, 15)
+        team_name = team_info.get('name', 'Team')
+        draw.text((padding_x, header_height // 2), f"{team_name} Fixtures",
+                  font=hdr_font, fill=TABLE_TEXT_BLACK, anchor="lm")
+        gws = list(gw_groups.keys())
+        gw_range_text = f"GW{gws[0]}–GW{gws[-1]}" if gws else ""
+        draw.text((img_width - padding_x, header_height // 2), gw_range_text,
+                  font=hdr_detail_font, fill=TABLE_TEXT_MUTED, anchor="rm")
+        draw.line([(0, header_height), (img_width, header_height)], fill=TABLE_BORDER, width=1)
+
+        # --- FDR Legend ---
+        legend_y = header_height + 6
+        _draw_fdr_legend(draw, legend_y, img_width)
+
+        # --- Column headers ---
+        col_y = header_height + legend_height
+        draw.rectangle([0, col_y, img_width, col_y + col_header_h], fill=TABLE_HEADER_BG)
+        draw.line([(0, col_y), (img_width, col_y)], fill=TABLE_BORDER, width=1)
+        col_font = ImageFont.truetype(FONT_BOLD, 13)
+        col_gw_x = padding_x + 20
+        col_fixture_x = padding_x + 80
+        col_fdr_x = img_width - padding_x - fdr_bar_w
+        draw.text((col_gw_x, col_y + col_header_h // 2), "GW",
+                  font=col_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+        draw.text((col_fixture_x, col_y + col_header_h // 2), "FIXTURE",
+                  font=col_font, fill=TABLE_TEXT_MUTED, anchor="lm")
+        draw.text((col_fdr_x + fdr_bar_w // 2, col_y + col_header_h // 2), "FDR",
+                  font=col_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+        draw.line([(0, col_y + col_header_h), (img_width, col_y + col_header_h)],
+                  fill=TABLE_BORDER, width=1)
+
+        # --- Fixture rows ---
+        y = col_y + col_header_h
+        gw_font = ImageFont.truetype(FONT_PATH, 15)
+        fixture_font = ImageFont.truetype(FONT_SEMIBOLD, 15)
+        fdr_font = ImageFont.truetype(FONT_SEMIBOLD, 14)
+
+        for gw, group in gw_groups.items():
+            row_center_y = y + row_h // 2
+
+            draw.text((col_gw_x, row_center_y), str(gw),
+                      font=gw_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+
+            if group[0].get('is_blank'):
+                draw.text((col_fixture_x, row_center_y), "BLANK GAMEWEEK",
+                          font=fixture_font, fill=TABLE_TEXT_MUTED, anchor="lm")
+                bgw_bg, bgw_text = FDR_BGW
+                bar_y = row_center_y - fdr_bar_h // 2
+                draw.rounded_rectangle([col_fdr_x, bar_y, col_fdr_x + fdr_bar_w, bar_y + fdr_bar_h],
+                                       radius=4, fill=bgw_bg)
+                draw.text((col_fdr_x + fdr_bar_w // 2, row_center_y), "BGW",
+                          font=fdr_font, fill=bgw_text, anchor="mm")
+            elif len(group) == 1:
+                f = group[0]
+                venue = "(H)" if f['is_home'] else "(A)"
+                fixture_text = f"{f['opponent']} {venue}"
+                draw.text((col_fixture_x, row_center_y), fixture_text,
+                          font=fixture_font, fill=TABLE_TEXT_BLACK, anchor="lm")
+                fdr = f.get('fdr', 3)
+                fdr_bg, fdr_text = FDR_COLORS.get(fdr, FDR_COLORS[3])
+                bar_y = row_center_y - fdr_bar_h // 2
+                draw.rounded_rectangle([col_fdr_x, bar_y, col_fdr_x + fdr_bar_w, bar_y + fdr_bar_h],
+                                       radius=4, fill=fdr_bg)
+                draw.text((col_fdr_x + fdr_bar_w // 2, row_center_y), str(fdr),
+                          font=fdr_font, fill=fdr_text, anchor="mm")
+            else:
+                # DGW
+                dgw_font = ImageFont.truetype(FONT_SEMIBOLD, 14)
+                parts = []
+                for f in group:
+                    venue = "(H)" if f['is_home'] else "(A)"
+                    parts.append(f"{f['opponent']}{venue}")
+                draw.text((col_fixture_x, row_center_y), ", ".join(parts),
+                          font=dgw_font, fill=TABLE_TEXT_BLACK, anchor="lm")
+                half_w = (fdr_bar_w - 4) // 2
+                for fi, f in enumerate(group[:2]):
+                    fdr = f.get('fdr', 3)
+                    fdr_bg, fdr_text = FDR_COLORS.get(fdr, FDR_COLORS[3])
+                    bx = col_fdr_x + fi * (half_w + 4)
+                    bar_y = row_center_y - fdr_bar_h // 2
+                    draw.rounded_rectangle([bx, bar_y, bx + half_w, bar_y + fdr_bar_h],
+                                           radius=4, fill=fdr_bg)
+                    draw.text((bx + half_w // 2, row_center_y), str(fdr),
+                              font=fdr_font, fill=fdr_text, anchor="mm")
+
+            y += row_h
+            draw.line([(padding_x, y), (img_width - padding_x, y)],
+                      fill=TABLE_BORDER, width=1)
+
+        # --- Footer ---
+        _draw_footer(draw, img, img_width, y, footer_height, current_gw, font_size=13)
+
+        img_byte_arr = io.BytesIO()
+        img.convert("RGB").save(img_byte_arr, format='PNG', quality=95)
+        img_byte_arr.seek(0)
+        return img_byte_arr
+
+    except Exception as e:
+        logger.error(f"Error generating single fixtures image: {e}", exc_info=True)
+        return None
+
+
+# =====================================================
+# Fixtures — All Teams Image
+# =====================================================
+
+def generate_fixtures_all_image(teams_fixtures, gw_range, current_gw):
+    """Generate an all-teams fixture difficulty grid image."""
+    try:
+        img_width = 660
+        padding_x = 12
+        header_height = 52
+        legend_height = 36
+        col_header_h = 34
+        row_h = 36
+        footer_height = 42
+        num_teams = len(teams_fixtures)
+        num_gws = len(gw_range)
+
+        total_height = header_height + legend_height + col_header_h + (num_teams * row_h) + footer_height
+
+        team_col_w = 130
+        gw_col_start = team_col_w + padding_x
+        cell_gap = 6
+        available_w = img_width - gw_col_start - padding_x
+        cell_w = (available_w - (num_gws - 1) * cell_gap) // num_gws
+
+        img = Image.new("RGBA", (img_width, total_height), TABLE_BG)
+        draw = ImageDraw.Draw(img)
+
+        # --- Header ---
+        draw.rectangle([0, 0, img_width, header_height], fill=TABLE_HEADER_BG)
+        hdr_font = ImageFont.truetype(FONT_BOLD, 18)
+        hdr_detail_font = ImageFont.truetype(FONT_PATH, 15)
+        draw.text((padding_x, header_height // 2), "Fixture Difficulty",
+                  font=hdr_font, fill=TABLE_TEXT_BLACK, anchor="lm")
+        gw_range_text = f"GW{gw_range[0]}–GW{gw_range[-1]}" if gw_range else ""
+        draw.text((img_width - padding_x, header_height // 2), gw_range_text,
+                  font=hdr_detail_font, fill=TABLE_TEXT_MUTED, anchor="rm")
+        draw.line([(0, header_height), (img_width, header_height)], fill=TABLE_BORDER, width=1)
+
+        # --- FDR Legend ---
+        legend_y = header_height + 6
+        _draw_fdr_legend(draw, legend_y, img_width)
+
+        # --- Column headers ---
+        col_y = header_height + legend_height
+        draw.rectangle([0, col_y, img_width, col_y + col_header_h], fill=TABLE_HEADER_BG)
+        draw.line([(0, col_y), (img_width, col_y)], fill=TABLE_BORDER, width=1)
+        col_font = ImageFont.truetype(FONT_BOLD, 13)
+        draw.text((padding_x + 8, col_y + col_header_h // 2), "TEAM",
+                  font=col_font, fill=TABLE_TEXT_MUTED, anchor="lm")
+        for gi, gw in enumerate(gw_range):
+            cx = gw_col_start + gi * (cell_w + cell_gap) + cell_w // 2
+            draw.text((cx, col_y + col_header_h // 2), f"GW{gw}",
+                      font=col_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+        draw.line([(0, col_y + col_header_h), (img_width, col_y + col_header_h)],
+                  fill=TABLE_BORDER, width=1)
+
+        # --- Team rows ---
+        y = col_y + col_header_h
+        team_font = ImageFont.truetype(FONT_SEMIBOLD, 14)
+        cell_font = ImageFont.truetype(FONT_SEMIBOLD, 13)
+        cell_font_sm = ImageFont.truetype(FONT_SEMIBOLD, 10)
+        cell_h = row_h - 6
+
+        for team_data in teams_fixtures:
+            row_center_y = y + row_h // 2
+
+            draw.text((padding_x + 8, row_center_y), team_data['team_short'],
+                      font=team_font, fill=TABLE_TEXT_BLACK, anchor="lm")
+
+            gw_lookup = {}
+            for f in team_data['fixtures']:
+                gw = f['gw']
+                if gw not in gw_lookup:
+                    gw_lookup[gw] = []
+                gw_lookup[gw].append(f)
+
+            for gi, gw in enumerate(gw_range):
+                cx = gw_col_start + gi * (cell_w + cell_gap)
+                cy = row_center_y - cell_h // 2
+
+                fxs = gw_lookup.get(gw, [])
+                if not fxs or (len(fxs) == 1 and fxs[0].get('is_blank')):
+                    bgw_bg, bgw_text = FDR_BGW
+                    draw.rounded_rectangle([cx, cy, cx + cell_w, cy + cell_h],
+                                           radius=3, fill=bgw_bg)
+                    draw.text((cx + cell_w // 2, row_center_y), "BGW",
+                              font=cell_font, fill=bgw_text, anchor="mm")
+                elif len(fxs) == 1:
+                    f = fxs[0]
+                    fdr = f.get('fdr', 3)
+                    fdr_bg, fdr_text = FDR_COLORS.get(fdr, FDR_COLORS[3])
+                    draw.rounded_rectangle([cx, cy, cx + cell_w, cy + cell_h],
+                                           radius=3, fill=fdr_bg)
+                    venue = "(H)" if f['is_home'] else "(A)"
+                    cell_text = f"{f['opponent']}{venue}"
+                    draw.text((cx + cell_w // 2, row_center_y), cell_text,
+                              font=cell_font, fill=fdr_text, anchor="mm")
+                else:
+                    # DGW — split cell
+                    half_w = (cell_w - 2) // 2
+                    for fi, f in enumerate(fxs[:2]):
+                        fdr = f.get('fdr', 3)
+                        fdr_bg, fdr_text = FDR_COLORS.get(fdr, FDR_COLORS[3])
+                        hx = cx + fi * (half_w + 2)
+                        draw.rounded_rectangle([hx, cy, hx + half_w, cy + cell_h],
+                                               radius=3, fill=fdr_bg)
+                        cell_text = f"{f['opponent']}"
+                        draw.text((hx + half_w // 2, row_center_y), cell_text,
+                                  font=cell_font_sm, fill=fdr_text, anchor="mm")
+
+            y += row_h
+            draw.line([(padding_x, y), (img_width - padding_x, y)],
+                      fill=TABLE_BORDER, width=1)
+
+        # --- Footer ---
+        _draw_footer(draw, img, img_width, y, footer_height, current_gw, font_size=14)
+
+        img_byte_arr = io.BytesIO()
+        img.convert("RGB").save(img_byte_arr, format='PNG', quality=95)
+        img_byte_arr.seek(0)
+        return img_byte_arr
+
+    except Exception as e:
+        logger.error(f"Error generating all fixtures image: {e}", exc_info=True)
+        return None

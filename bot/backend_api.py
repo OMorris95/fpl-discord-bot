@@ -62,6 +62,11 @@ async def get_fixtures(session: aiohttp.ClientSession) -> list | None:
     return await _get(session, "/api/fpl/fixtures/")
 
 
+async def get_element_summary(session: aiohttp.ClientSession, player_id: int) -> dict | None:
+    """Fetch player element-summary (GW history + upcoming fixtures)."""
+    return await _get(session, f"/api/fpl/element-summary/{player_id}/")
+
+
 # =====================================================
 # LEAGUE AGGREGATED ENDPOINTS (single-call, DB-backed)
 # =====================================================

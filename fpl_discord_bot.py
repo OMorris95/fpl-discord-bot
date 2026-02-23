@@ -33,12 +33,14 @@ from bot.backend_api import (
     get_league_standings, get_league_picks, get_league_history,
     get_league_transfers, get_manager_picks, get_manager_transfers,
     get_current_gameweek, get_last_completed_gameweek, get_gameweek_info,
+    get_element_summary,
     FplUnavailableError,
 )
 from bot.image_generator import (
     generate_team_image, generate_dreamteam_image, format_manager_link,
     build_manager_url, generate_gw_summary_image, generate_recap_image,
-    _format_short_name,
+    _format_short_name, generate_player_ownership_image,
+    generate_fixtures_single_image, generate_fixtures_all_image,
 )
 
 # Load environment variables from .env file
@@ -1024,6 +1026,10 @@ async def team(interaction: discord.Interaction, manager: str = None):
         live_data = await backend_get_live_data(session, current_gw)
         if live_data:
             live_data['gw'] = current_gw
+            # Attach fixtures so unstarted games show fixture text instead of 0 pts
+            fixtures = await backend_get_fixtures(session)
+            if fixtures:
+                live_data['fixtures'] = [f for f in fixtures if f.get('event') == current_gw]
 
     if not live_data:
         await interaction.followup.send(f"Could not fetch data for Gameweek {current_gw}.")
@@ -1255,10 +1261,11 @@ async def player(interaction: discord.Interaction, player: str):
         await interaction.followup.send("Could not determine the current gameweek.")
         return
 
-    # Fetch bootstrap and league data
-    bootstrap_data, league_data = await asyncio.gather(
+    # Fetch bootstrap, league data, and element summary in parallel
+    bootstrap_data, league_data, element_summary = await asyncio.gather(
         get_bootstrap(session),
-        get_league_standings(session, int(league_id))
+        get_league_standings(session, int(league_id)),
+        get_element_summary(session, player_id)
     )
 
     if not bootstrap_data or not league_data:
@@ -1266,13 +1273,12 @@ async def player(interaction: discord.Interaction, player: str):
         return
 
     all_players = {p['id']: p for p in bootstrap_data.get('elements', [])}
+    teams_map = {t['id']: t for t in bootstrap_data.get('teams', [])}
     selected_player = all_players.get(player_id)
 
     if not selected_player:
         await interaction.followup.send("Player not found.")
         return
-
-    player_name = selected_player['web_name']
 
     # Use backend league picks (DB-cached)
     raw_picks = await get_league_picks(session, int(league_id), current_gw)
@@ -1293,22 +1299,26 @@ async def player(interaction: discord.Interaction, player: str):
                     else:
                         owners.append(manager_name)
                     break
-    
-    embed = discord.Embed(
-        title=f"Ownership for {player_name}",
-        color=discord.Color.blue()
+
+    # Extract last 5 GW history
+    gw_history = []
+    if element_summary and 'history' in element_summary:
+        gw_history = element_summary['history'][-5:]
+
+    team_info = teams_map.get(selected_player.get('team'), {})
+
+    image_data = await asyncio.to_thread(
+        generate_player_ownership_image,
+        selected_player, team_info, current_gw,
+        gw_history, owners, benched
     )
 
-    if not owners and not benched:
-        embed.description = f"**{player_name}** is not owned by any managers in the league."
+    if image_data:
+        file = discord.File(image_data, filename="player_ownership.png")
+        link_text = f"[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league?{league_id}>)"
+        await interaction.followup.send(content=link_text, file=file)
     else:
-        if owners:
-            embed.add_field(name=f"Owned By ({len(owners)})", value="\n".join(owners), inline=True)
-        if benched:
-            embed.add_field(name=f"Benched By ({len(benched)})", value="\n".join(benched), inline=True)
-
-    embed.add_field(name="\u200b", value=f"[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league?{league_id}>)", inline=False)
-    await interaction.followup.send(embed=embed)
+        await interaction.followup.send("Failed to generate player image.", ephemeral=True)
 
 @player.autocomplete('player')
 async def player_autocomplete(interaction: discord.Interaction, current: str):
@@ -1542,110 +1552,112 @@ async def fixtures(interaction: discord.Interaction, team: str = None):
         return
 
     teams_map = {t['id']: t for t in bootstrap_data.get('teams', [])}
-    
-    embed = discord.Embed(title="Upcoming Fixtures", color=discord.Color.blue())
-    embed.description = "```\nEasy           Hard    Blank\n🟢  🟩  ⬜  🟧  🟥      ⛔\n```"
 
     team_id_to_show = int(team) if team else None
 
-    def get_fdr_emoji(difficulty):
-        if difficulty == 1:
-            return "🟢"
-        elif difficulty == 2:
-            return "🟩"
-        elif difficulty == 3:
-            return "⬜"
-        elif difficulty == 4:
-            return "🟧"
-        else:
-            return "🟥"
-
     if team_id_to_show:
-        # Specific team: show next 10 fixtures (including BGWs)
+        # Specific team: show next 10 fixtures (excluding current live GW)
+        next_gw = current_gw + 1
         team_upcoming = [
             f for f in fixtures_data
-            if f.get('event') and f['event'] >= current_gw
+            if f.get('event') and f['event'] >= next_gw
                and (f['team_h'] == team_id_to_show or f['team_a'] == team_id_to_show)
         ]
         team_upcoming.sort(key=lambda x: x['event'])
         team_upcoming = team_upcoming[:10]
 
-        team_name = teams_map[team_id_to_show]['name']
-        fixture_lines = []
-        if team_upcoming:
-            # Find all GWs in the range to detect blanks
-            team_fixture_gws = {f['event'] for f in team_upcoming}
-            min_gw = current_gw
-            max_gw = team_upcoming[-1]['event']
+        if not team_upcoming:
+            await interaction.followup.send("No upcoming fixtures found for this team.")
+            return
 
-            fixture_idx = 0
-            for gw in range(min_gw, max_gw + 1):
-                if gw in team_fixture_gws:
+        # Build structured fixture list (handles DGWs naturally)
+        team_fixture_gws = {f['event'] for f in team_upcoming}
+        min_gw = next_gw
+        max_gw = team_upcoming[-1]['event']
+
+        fixture_rows = []
+        fixture_idx = 0
+        for gw in range(min_gw, max_gw + 1):
+            if gw in team_fixture_gws:
+                # Could be multiple fixtures in same GW (DGW)
+                while fixture_idx < len(team_upcoming) and team_upcoming[fixture_idx]['event'] == gw:
                     f = team_upcoming[fixture_idx]
-                    fixture_idx += 1
                     is_home = f['team_h'] == team_id_to_show
-                    opponent = teams_map[f['team_a'] if is_home else f['team_h']]['short_name']
-                    difficulty = f['team_h_difficulty'] if is_home else f['team_a_difficulty']
-                    fdr_emoji = get_fdr_emoji(difficulty)
-                    venue = "(H)" if is_home else "(A)"
-                    fixture_lines.append(f"{f'GW{gw}':<5} {opponent}{venue} {fdr_emoji}")
-                else:
-                    fixture_lines.append(f"{f'GW{gw}':<5} BGW    ⛔")
+                    opponent_id = f['team_a'] if is_home else f['team_h']
+                    fixture_rows.append({
+                        'gw': gw,
+                        'opponent': teams_map[opponent_id]['name'],
+                        'is_home': is_home,
+                        'fdr': f['team_h_difficulty'] if is_home else f['team_a_difficulty'],
+                        'is_blank': False,
+                    })
+                    fixture_idx += 1
+            else:
+                fixture_rows.append({'gw': gw, 'is_blank': True})
 
-        if fixture_lines:
-            value_string = "```\n" + "\n".join(fixture_lines) + "\n```"
-            embed.add_field(name=team_name, value=value_string, inline=False)
-        else:
-            embed.add_field(name=teams_map[team_id_to_show]['name'], value="No upcoming fixtures found.", inline=False)
+        team_info = teams_map[team_id_to_show]
+        image_data = await asyncio.to_thread(
+            generate_fixtures_single_image, team_info, fixture_rows, current_gw
+        )
 
-    else: # All teams — next 5 GWs (showing BGWs)
+    else:
+        # All teams — next 5 GWs (excluding current live GW)
+        next_gw = current_gw + 1
         all_upcoming = sorted(
-            [f for f in fixtures_data if f.get('event') and f['event'] >= current_gw],
+            [f for f in fixtures_data if f.get('event') and f['event'] >= next_gw],
             key=lambda x: x['event']
         )
 
-        # Build per-team fixture map: team_id -> { gw: fixture_line }
+        # Build per-team structured fixture data (supports DGWs)
         team_gw_fixtures = {team_id: {} for team_id in teams_map}
         for f in all_upcoming:
             gw = f['event']
-            gw_str = f"GW{gw}"
             # Home team
             if gw not in team_gw_fixtures[f['team_h']]:
-                h_opponent = teams_map[f['team_a']]['short_name']
-                h_fdr = get_fdr_emoji(f['team_h_difficulty'])
-                team_gw_fixtures[f['team_h']][gw] = f"{gw_str:<5} {h_opponent}(H) {h_fdr}"
+                team_gw_fixtures[f['team_h']][gw] = []
+            team_gw_fixtures[f['team_h']][gw].append({
+                'gw': gw,
+                'opponent': teams_map[f['team_a']]['short_name'],
+                'is_home': True,
+                'fdr': f['team_h_difficulty'],
+                'is_blank': False,
+            })
             # Away team
             if gw not in team_gw_fixtures[f['team_a']]:
-                a_opponent = teams_map[f['team_h']]['short_name']
-                a_fdr = get_fdr_emoji(f['team_a_difficulty'])
-                team_gw_fixtures[f['team_a']][gw] = f"{gw_str:<5} {a_opponent}(A) {a_fdr}"
+                team_gw_fixtures[f['team_a']][gw] = []
+            team_gw_fixtures[f['team_a']][gw].append({
+                'gw': gw,
+                'opponent': teams_map[f['team_h']]['short_name'],
+                'is_home': False,
+                'fdr': f['team_a_difficulty'],
+                'is_blank': False,
+            })
 
-        # Determine the 5 GW window
-        gw_range = list(range(current_gw, current_gw + 5))
+        gw_range = list(range(next_gw, next_gw + 5))
 
-        # Create a list of fields to be added
-        fields_to_add = []
+        teams_fixtures = []
         for team_id, team_data in sorted(teams_map.items(), key=lambda x: x[1]['name']):
-            lines = []
+            team_fixture_list = []
             for gw in gw_range:
                 if gw in team_gw_fixtures[team_id]:
-                    lines.append(team_gw_fixtures[team_id][gw])
+                    team_fixture_list.extend(team_gw_fixtures[team_id][gw])
                 else:
-                    lines.append(f"{f'GW{gw}':<5} BGW    ⛔")
-            value_string = "```\n" + "\n".join(lines) + "\n```"
-            fields_to_add.append({'name': team_data['name'], 'value': value_string, 'inline': True})
-        
-        # Add fields in chunks of 3 to ensure alignment
-        for i in range(0, len(fields_to_add), 3):
-            chunk = fields_to_add[i:i+3]
-            for field in chunk:
-                embed.add_field(name=field['name'], value=field['value'], inline=True)
-            # Add blank fields to fill the row if it's not a full row of 3
-            if len(chunk) < 3:
-                for _ in range(3 - len(chunk)):
-                    embed.add_field(name='\u200b', value='\u200b', inline=True)
+                    team_fixture_list.append({'gw': gw, 'is_blank': True})
+            teams_fixtures.append({
+                'team_short': team_data['name'],
+                'team_name': team_data['name'],
+                'fixtures': team_fixture_list,
+            })
 
-    await interaction.followup.send(embed=embed)
+        image_data = await asyncio.to_thread(
+            generate_fixtures_all_image, teams_fixtures, gw_range, current_gw
+        )
+
+    if image_data:
+        file = discord.File(image_data, filename="fixtures.png")
+        await interaction.followup.send(file=file)
+    else:
+        await interaction.followup.send("Failed to generate fixtures image.", ephemeral=True)
 
 @fixtures.autocomplete('team')
 async def fixtures_autocomplete(interaction: discord.Interaction, current: str):
