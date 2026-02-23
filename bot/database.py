@@ -230,44 +230,44 @@ def get_all_league_teams(guild_id: int, league_id: int):
         return []
 
 
-def is_goal_subscribed(channel_id: int):
-    """Checks if a channel is subscribed to goal alerts."""
+def is_live_alert_subscribed(channel_id: int):
+    """Checks if a channel is subscribed to live alerts."""
     try:
         with sqlite3.connect(DB_PATH) as con:
             cur = con.cursor()
             cur.execute("SELECT 1 FROM goal_subscriptions WHERE channel_id = ?", (str(channel_id),))
             return cur.fetchone() is not None
     except sqlite3.Error as e:
-        logger.error(f"Database error in is_goal_subscribed: {e}")
+        logger.error(f"Database error in is_live_alert_subscribed: {e}")
         return False
 
 
-def add_goal_subscription(channel_id: int, league_id: int):
-    """Adds a channel to the goal alert subscription list."""
+def add_live_alert_subscription(channel_id: int, league_id: int):
+    """Adds a channel to the live alert subscription list."""
     try:
         with sqlite3.connect(DB_PATH) as con:
             cur = con.cursor()
             cur.execute("INSERT INTO goal_subscriptions (channel_id, league_id) VALUES (?, ?)", (str(channel_id), league_id))
             con.commit()
     except sqlite3.Error as e:
-        logger.error(f"Database error in add_goal_subscription: {e}")
+        logger.error(f"Database error in add_live_alert_subscription: {e}")
         raise
 
 
-def remove_goal_subscription(channel_id: int):
-    """Removes a channel from the goal alert subscription list."""
+def remove_live_alert_subscription(channel_id: int):
+    """Removes a channel from the live alert subscription list."""
     try:
         with sqlite3.connect(DB_PATH) as con:
             cur = con.cursor()
             cur.execute("DELETE FROM goal_subscriptions WHERE channel_id = ?", (str(channel_id),))
             con.commit()
     except sqlite3.Error as e:
-        logger.error(f"Database error in remove_goal_subscription: {e}")
+        logger.error(f"Database error in remove_live_alert_subscription: {e}")
         raise
 
 
-def get_all_goal_subscriptions():
-    """Gets all channel IDs and their league IDs subscribed to goal alerts."""
+def get_all_live_alert_subscriptions():
+    """Gets all channel IDs and their league IDs subscribed to live alerts."""
     try:
         with sqlite3.connect(DB_PATH) as con:
             con.row_factory = sqlite3.Row
@@ -275,7 +275,7 @@ def get_all_goal_subscriptions():
             cur.execute("SELECT channel_id, league_id, transfer_alerts_enabled FROM goal_subscriptions")
             return cur.fetchall()
     except sqlite3.Error as e:
-        logger.error(f"Database error in get_all_goal_subscriptions: {e}")
+        logger.error(f"Database error in get_all_live_alert_subscriptions: {e}")
         return []
 
 

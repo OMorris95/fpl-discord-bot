@@ -366,7 +366,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
 
     # Header bar
     hdr_font = ImageFont.truetype(FONT_BOLD, 22)
-    hdr_detail_font = ImageFont.truetype(FONT_PATH, 20)
+    hdr_detail_font = ImageFont.truetype(FONT_PATH, 24)
     chip_font = ImageFont.truetype(FONT_BOLD, 12)
     canvas_draw.rectangle([0, 0, pitch_w, hdr_height], fill=TABLE_HEADER_BG)
     team_name_text = summary_data.get('team_name', 'My Team')
@@ -376,7 +376,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
     active_chip = fpl_data['picks'].get('active_chip')
     chip_right_edge = pitch_w - 10  # where points text will anchor from
     detail_text = f"{summary_data['gw_points']} pts  \u2022  Total: {summary_data['total_points']}"
-    canvas_draw.text((chip_right_edge, (hdr_height - 20) // 2), detail_text, font=hdr_detail_font, fill="#525252", anchor="ra")
+    canvas_draw.text((chip_right_edge, (hdr_height - 24) // 2), detail_text, font=hdr_detail_font, fill="#525252", anchor="ra")
 
     if active_chip and active_chip in CHIP_COLORS:
         chip_bg, chip_label = CHIP_COLORS[active_chip]
@@ -562,7 +562,7 @@ def generate_dreamteam_image(fpl_data, summary_data):
 
     # Header bar
     hdr_font = ImageFont.truetype(FONT_BOLD, 22)
-    hdr_detail_font = ImageFont.truetype(FONT_PATH, 20)
+    hdr_detail_font = ImageFont.truetype(FONT_PATH, 24)
     canvas_draw.rectangle([0, 0, pitch_w, hdr_height], fill=TABLE_HEADER_BG)
     league_name = summary_data.get('league_name', 'Dream Team')
     if len(league_name) >= 20:
@@ -570,7 +570,7 @@ def generate_dreamteam_image(fpl_data, summary_data):
     canvas_draw.text((10, (hdr_height - 22) // 2), league_name, font=hdr_font, fill=TABLE_TEXT_BLACK)
     gw = summary_data.get('gameweek', '')
     detail_text = f"Dream Team GW{gw}  \u2022  {summary_data['total_points']} pts"
-    canvas_draw.text((pitch_w - 10, (hdr_height - 20) // 2), detail_text, font=hdr_detail_font, fill="#525252", anchor="ra")
+    canvas_draw.text((pitch_w - 10, (hdr_height - 24) // 2), detail_text, font=hdr_detail_font, fill="#525252", anchor="ra")
     canvas_draw.line([(0, hdr_height), (pitch_w, hdr_height)], fill=TABLE_BORDER, width=1)
 
     # Paste pitch
@@ -611,7 +611,7 @@ TABLE_BG = "#FFFFFF"
 TABLE_HEADER_BG = "#F5F5F4"       # editorial-bg
 TABLE_BORDER = "#E5E5E4"          # border-light
 TABLE_TEXT_BLACK = "#171717"       # ink-black
-TABLE_TEXT_MUTED = "#737373"       # ink-muted
+TABLE_TEXT_MUTED = "#404040"       # ink-muted (darkened for footer readability)
 TABLE_GW_BLUE = "#2563EB"         # blue-600
 TABLE_RANK_UP = "#059669"         # green
 TABLE_RANK_DOWN = "#DC2626"       # red
@@ -1334,7 +1334,7 @@ def generate_player_ownership_image(player_info, team_info, current_gw,
         # Must exactly match y increments in drawing code below
         jersey_h = 80
         player_section_h = 16 + jersey_h + 6 + 20 + 4 + 16 + 4 + 16  # top_pad through total_pts
-        gw_row_h = 2 + 14 + 32 + 12  # gap + labels + boxes + bottom_pad
+        gw_row_h = 4 + 14 + 32 + 12  # gap + labels + boxes + bottom_pad
         import math
         owned_rows = math.ceil(len(owners) / 2) if owners else 0
         benched_rows = math.ceil(len(benched) / 2) if benched else 0
@@ -1393,7 +1393,7 @@ def generate_player_ownership_image(player_info, team_info, current_gw,
         y += 16
 
         # --- Last 5 GW history boxes ---
-        y += 2
+        y += 4
         gw_label_font = ImageFont.truetype(FONT_REGULAR, 10)
         gw_pts_font = ImageFont.truetype(FONT_SEMIBOLD, 13)
         box_w, box_h = 52, 32
@@ -1405,23 +1405,32 @@ def generate_player_ownership_image(player_info, team_info, current_gw,
         while len(history_entries) < 5:
             history_entries.insert(0, None)
 
+        bgw_font = ImageFont.truetype(FONT_SEMIBOLD, 10)
         for i, entry in enumerate(history_entries):
             bx = start_x + i * (box_w + box_gap)
             if entry:
                 gw_label = f"GW{entry.get('round', '?')}"
-                pts_text = str(entry.get('total_points', 0))
+                if entry.get('is_bgw'):
+                    pts_text = "BGW"
+                    pts_font_used = bgw_font
+                    pts_color = TABLE_TEXT_MUTED
+                else:
+                    pts_text = str(entry.get('total_points', 0))
+                    pts_font_used = gw_pts_font
+                    pts_color = TABLE_TEXT_BLACK
             else:
                 gw_label = "-"
                 pts_text = "-"
+                pts_font_used = gw_pts_font
+                pts_color = TABLE_TEXT_MUTED
 
             draw.text((bx + box_w // 2, y), gw_label,
                       font=gw_label_font, fill=TABLE_TEXT_MUTED, anchor="ma")
             by = y + 14
             draw.rounded_rectangle([bx, by, bx + box_w, by + box_h],
-                                   radius=4, fill=TABLE_HEADER_BG)
-            pts_color = TABLE_TEXT_BLACK if entry else TABLE_TEXT_MUTED
+                                   radius=4, fill="#E5E5E4")
             draw.text((bx + box_w // 2, by + box_h // 2), pts_text,
-                      font=gw_pts_font, fill=pts_color, anchor="mm")
+                      font=pts_font_used, fill=pts_color, anchor="mm")
 
         y += 14 + box_h + 12
 
