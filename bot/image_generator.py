@@ -33,7 +33,7 @@ NAME_BOX_COLOR = (0, 0, 0, 200)  # Black, mostly opaque
 # --- Glassmorphism Settings ---
 GLASS_PADDING_TOP = 8       # Padding above jersey inside glass card
 GLASS_BLUR_RADIUS = 10      # Gaussian blur radius
-GLASS_TINT = (0, 0, 0, 102) # ~40% opacity black (dark mode style)
+GLASS_TINT = (0, 0, 0, 60)  # ~24% opacity black (lighter to match website)
 GLASS_CORNER_RADIUS = 10    # Rounded top corners
 
 
@@ -199,7 +199,7 @@ def calculate_player_coordinates(picks, all_players, width, height):
     coords = {}
 
     # Vertical Layout Y-coordinates (approximate ratios for mobile pitch)
-    y_ratios = {1: 0.13, 2: 0.31, 3: 0.50, 4: 0.69}
+    y_ratios = {1: 0.07, 2: 0.26, 3: 0.47, 4: 0.67}
 
     # Calculate coordinates for starters
     for pos_type, y_ratio in y_ratios.items():
@@ -212,7 +212,7 @@ def calculate_player_coordinates(picks, all_players, width, height):
             coords[p['element']] = (x, y)
 
     # Calculate coordinates for bench (Horizontal row at bottom)
-    bench_y = int(height * 0.89)
+    bench_y = int(height * 0.88)
     for i, p in enumerate(bench):
         x = int(width * (i + 0.5) / len(bench))
         coords[p['element']] = (x, bench_y)
@@ -229,7 +229,6 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         name_font = ImageFont.truetype(FONT_PATH, NAME_FONT_SIZE)
         points_font = ImageFont.truetype(FONT_PATH, POINTS_FONT_SIZE)
         captain_font = ImageFont.truetype(FONT_PATH, CAPTAIN_FONT_SIZE)
-        summary_font = ImageFont.truetype(FONT_PATH, SUMMARY_FONT_SIZE)
         name_sample_bbox = draw.textbbox((0, 0), "Agjpqy", font=name_font)
         points_sample_bbox = draw.textbbox((0, 0), "Agjpqy 0123456789", font=points_font)
         fixed_name_box_height = (name_sample_bbox[3] - name_sample_bbox[1]) + 4
@@ -358,32 +357,49 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         elif player_pick['is_vice_captain']:
             draw_captain_indicator(background, draw, captain_font, "V", paste_x, paste_y)
 
-    # Draw Header Info (Team Name, GW Points, Total Points)
-    header_y = 20
-    left_margin = 20
+    # Wrap pitch in editorial header + footer (scaled 1.25x for 600px width)
+    hdr_height = 48
+    ftr_height = 45
+    pitch_w, pitch_h = background.size
+    canvas = Image.new("RGBA", (pitch_w, hdr_height + pitch_h + ftr_height), TABLE_BG)
+    canvas_draw = ImageDraw.Draw(canvas)
 
-    # Team Name
+    # Header bar
+    hdr_font = ImageFont.truetype(FONT_BOLD, 22)
+    hdr_detail_font = ImageFont.truetype(FONT_PATH, 18)
+    canvas_draw.rectangle([0, 0, pitch_w, hdr_height], fill=TABLE_HEADER_BG)
     team_name_text = summary_data.get('team_name', 'My Team')
-    team_font = ImageFont.truetype(FONT_PATH, 28)
-    draw.text((left_margin - 10, header_y - 6), team_name_text, font=team_font, fill="white")
+    canvas_draw.text((10, (hdr_height - 22) // 2), team_name_text, font=hdr_font, fill=TABLE_TEXT_BLACK)
+    gw_num = fpl_data['live'].get('gw', '')
+    detail_text = f"GW{gw_num}: {summary_data['gw_points']} pts  \u2022  Total: {summary_data['total_points']}"
+    canvas_draw.text((pitch_w - 10, (hdr_height - 18) // 2), detail_text, font=hdr_detail_font, fill="#525252", anchor="ra")
+    canvas_draw.line([(0, hdr_height), (pitch_w, hdr_height)], fill=TABLE_BORDER, width=1)
 
-    # Position points info from right side of canvas
-    right_margin = 20
-    gw_text = f"GW{fpl_data['live'].get('gw', '')} PTS: {summary_data['gw_points']}"
-    total_text = f"Total PTS: {summary_data['total_points']}"
-    gw_bbox = draw.textbbox((0, 0), gw_text, font=summary_font)
-    total_bbox = draw.textbbox((0, 0), total_text, font=summary_font)
-    max_text_width = max(gw_bbox[2], total_bbox[2])
-    points_x = background.width - max_text_width - right_margin
+    # Paste pitch
+    canvas.paste(background, (0, hdr_height))
 
-    # GW Points
-    draw.text((points_x, header_y - 14), gw_text, font=summary_font, fill="white")
+    # Footer
+    footer_y = hdr_height + pitch_h
+    ftr_font = ImageFont.truetype(FONT_PATH, 16)
+    canvas_draw.line([(0, footer_y), (pitch_w, footer_y)], fill=TABLE_BORDER, width=1)
+    footer_text = f"GW{gw_num} \u2022 livefplstats.com"
+    canvas_draw.text((pitch_w // 2, footer_y + ftr_height // 2), footer_text,
+                     font=ftr_font, fill=TABLE_TEXT_MUTED, anchor="mm")
 
-    # Total Points (below GW points)
-    draw.text((points_x, header_y + 12), total_text, font=summary_font, fill="white")
+    # Gradient bar
+    total_h = hdr_height + pitch_h + ftr_height
+    gradient_height = 4
+    gradient_y = total_h - gradient_height
+    for x in range(pitch_w):
+        t = x / max(pitch_w - 1, 1)
+        r = int(0xFE + (0xC2 - 0xFE) * t)
+        g = int(0xBF + (0x16 - 0xBF) * t)
+        b = int(0x04 + (0x00 - 0x04) * t)
+        for dy in range(gradient_height):
+            canvas.putpixel((x, gradient_y + dy), (r, g, b, 255))
 
     img_byte_arr = io.BytesIO()
-    background.convert("RGB").save(img_byte_arr, format='PNG')
+    canvas.convert("RGB").save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
     return img_byte_arr
 
@@ -397,7 +413,6 @@ def generate_dreamteam_image(fpl_data, summary_data):
         draw = ImageDraw.Draw(background)
         name_font = ImageFont.truetype(FONT_PATH, NAME_FONT_SIZE)
         points_font = ImageFont.truetype(FONT_PATH, POINTS_FONT_SIZE)
-        summary_font = ImageFont.truetype(FONT_PATH, SUMMARY_FONT_SIZE)
         potw_font = ImageFont.truetype(FONT_PATH, 20)  # Player of the Week font
         name_sample_bbox = draw.textbbox((0, 0), "Agjpqy", font=name_font)
         points_sample_bbox = draw.textbbox((0, 0), "Agjpqy 0123456789", font=points_font)
@@ -469,39 +484,15 @@ def generate_dreamteam_image(fpl_data, summary_data):
         draw.text((x - name_bbox[2] / 2, name_box_y + NAME_TEXT_Y_OFFSET), name_text, font=name_font, fill="white")
         draw.text((x - points_bbox[2] / 2, points_box_y), points_text, font=points_font, fill="white")
 
-    # Draw Header Info for Dream Team
-    header_y = 20
-    left_margin = 20
-
-    # League Name (truncate if >= 20 chars)
-    league_name = summary_data.get('league_name', 'Dream Team')
-    if len(league_name) >= 20:
-        league_name = league_name[:18] + "..."
-    team_font = ImageFont.truetype(FONT_PATH, 28)
-    draw.text((left_margin - 10, header_y - 6), league_name, font=team_font, fill="white")
-
-    # Position points info from right side of canvas
-    right_margin = 20
-    gw = summary_data.get('gameweek', '')
-    dream_text = f"Dream Team GW{gw}"
-    gw_points_text = f"GW PTS: {summary_data['total_points']}"
-    dream_bbox = draw.textbbox((0, 0), dream_text, font=summary_font)
-    gw_bbox = draw.textbbox((0, 0), gw_points_text, font=summary_font)
-    max_text_width = max(dream_bbox[2], gw_bbox[2])
-    points_x = background.width - max_text_width - right_margin
-
-    draw.text((points_x, header_y - 14), dream_text, font=summary_font, fill="white")
-    draw.text((points_x, header_y + 12), gw_points_text, font=summary_font, fill="white")
-
-    # Draw Player of the Week section (centered at bottom)
+    # Draw Player of the Week section (centered at bottom of pitch)
     potw_data = summary_data['player_of_week']
     potw_player_info = potw_data['player_info']
     potw_name = potw_player_info['web_name']
     potw_points = potw_data['points']
 
     # POTW fonts
-    potw_title_font = ImageFont.truetype(FONT_PATH, 36)  # Larger title
-    potw_details_font = ImageFont.truetype(FONT_PATH, 28)  # Smaller details
+    potw_title_font = ImageFont.truetype(FONT_PATH, 36)
+    potw_details_font = ImageFont.truetype(FONT_PATH, 28)
 
     # Load jersey for POTW using utility function
     team_id = potw_player_info['team']
@@ -509,19 +500,18 @@ def generate_dreamteam_image(fpl_data, summary_data):
     is_goalkeeper = potw_player_info['element_type'] == 1
     potw_img = load_jersey_image(team_name, is_goalkeeper, target_height=JERSEY_SIZE[1])
 
-    # Draw "Player of the Week" title - centered horizontally, higher up
+    # Draw "Player of the Week" title - centered horizontally
     title_text = "Player of the Week"
     title_bbox = draw.textbbox((0, 0), title_text, font=potw_title_font)
     title_width = title_bbox[2]
     title_x = (width - title_width) // 2
-    title_y = int(height * 0.85) - 15  # Adjust this to move title up/down
+    title_y = int(height * 0.85) - 15
     draw.text((title_x, title_y), title_text, font=potw_title_font, fill="black")
 
     # Calculate positioning for details section (name, pts, stats + jersey)
-    details_y = title_y + 70  # Adjust this to move details up/down (was 40, now 50 = 10px lower)
+    details_y = title_y + 70
     jersey_width = potw_img.width if potw_img else 0
 
-    # Get max width of detail texts
     name_bbox = draw.textbbox((0, 0), potw_name, font=potw_details_font)
     pts_bbox = draw.textbbox((0, 0), f"{potw_points} pts", font=potw_details_font)
     stats_bbox = draw.textbbox((0, 0), f"G: {potw_data['goals']} A: {potw_data['assists']}", font=potw_details_font)
@@ -530,19 +520,60 @@ def generate_dreamteam_image(fpl_data, summary_data):
     total_width = max_text_width + 20 + jersey_width
     start_x = (width - total_width) // 2
 
-    # Draw player details (left-aligned within centered section)
     draw.text((start_x, details_y), potw_name, font=potw_details_font, fill="black")
     draw.text((start_x, details_y + 28), f"{potw_points} pts", font=potw_details_font, fill="black")
     draw.text((start_x, details_y + 56), f"G: {potw_data['goals']} A: {potw_data['assists']}", font=potw_details_font, fill="black")
 
-    # Draw jersey to the right of text
     if potw_img:
         jersey_x = start_x + max_text_width + 20
-        jersey_y = details_y - 10  # Adjust this to move jersey up/down
+        jersey_y = details_y - 10
         background.paste(potw_img, (jersey_x, jersey_y), potw_img)
 
+    # Wrap pitch in editorial header + footer (scaled 1.25x for 600px width)
+    hdr_height = 48
+    ftr_height = 45
+    pitch_w, pitch_h = background.size
+    canvas = Image.new("RGBA", (pitch_w, hdr_height + pitch_h + ftr_height), TABLE_BG)
+    canvas_draw = ImageDraw.Draw(canvas)
+
+    # Header bar
+    hdr_font = ImageFont.truetype(FONT_BOLD, 22)
+    hdr_detail_font = ImageFont.truetype(FONT_PATH, 20)
+    canvas_draw.rectangle([0, 0, pitch_w, hdr_height], fill=TABLE_HEADER_BG)
+    league_name = summary_data.get('league_name', 'Dream Team')
+    if len(league_name) >= 20:
+        league_name = league_name[:18] + "..."
+    canvas_draw.text((10, (hdr_height - 22) // 2), league_name, font=hdr_font, fill=TABLE_TEXT_BLACK)
+    gw = summary_data.get('gameweek', '')
+    detail_text = f"Dream Team GW{gw}  \u2022  {summary_data['total_points']} pts"
+    canvas_draw.text((pitch_w - 10, (hdr_height - 20) // 2), detail_text, font=hdr_detail_font, fill="#525252", anchor="ra")
+    canvas_draw.line([(0, hdr_height), (pitch_w, hdr_height)], fill=TABLE_BORDER, width=1)
+
+    # Paste pitch
+    canvas.paste(background, (0, hdr_height))
+
+    # Footer
+    footer_y = hdr_height + pitch_h
+    ftr_font = ImageFont.truetype(FONT_PATH, 16)
+    canvas_draw.line([(0, footer_y), (pitch_w, footer_y)], fill=TABLE_BORDER, width=1)
+    footer_text = f"GW{gw} \u2022 livefplstats.com"
+    canvas_draw.text((pitch_w // 2, footer_y + ftr_height // 2), footer_text,
+                     font=ftr_font, fill=TABLE_TEXT_MUTED, anchor="mm")
+
+    # Gradient bar
+    total_h = hdr_height + pitch_h + ftr_height
+    gradient_height = 4
+    gradient_y = total_h - gradient_height
+    for x in range(pitch_w):
+        t = x / max(pitch_w - 1, 1)
+        r = int(0xFE + (0xC2 - 0xFE) * t)
+        g = int(0xBF + (0x16 - 0xBF) * t)
+        b = int(0x04 + (0x00 - 0x04) * t)
+        for dy in range(gradient_height):
+            canvas.putpixel((x, gradient_y + dy), (r, g, b, 255))
+
     img_byte_arr = io.BytesIO()
-    background.convert("RGB").save(img_byte_arr, format='PNG')
+    canvas.convert("RGB").save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
     return img_byte_arr
 
@@ -675,7 +706,7 @@ def generate_league_table_image(league_name, current_gw, managers, website_url=N
         points_font = ImageFont.truetype(FONT_BOLD, 14)
         gw_font = ImageFont.truetype(FONT_PATH, 14)
         rank_font = ImageFont.truetype(FONT_PATH, 13)
-        footer_font = ImageFont.truetype(FONT_PATH, 11)
+        footer_font = ImageFont.truetype(FONT_PATH, 13)
     except Exception as e:
         logger.error(f"Error loading fonts for league table: {e}")
         return None
@@ -843,7 +874,7 @@ def _draw_player_column(img, draw, cx, top_y, player_name, team_name, managers, 
     # Player name (truncated)
     display_name = player_name[:9] + "..." if len(player_name) > 9 else player_name
     draw.text((cx, y), display_name, font=name_font, fill=TABLE_TEXT_BLACK, anchor="ma")
-    y += 16
+    y += 17
 
     # Manager names
     for mgr in managers:
@@ -914,10 +945,10 @@ def generate_gw_summary_image(gw_number, league_name, captains_data, transfers_i
     """
     try:
         header_font = ImageFont.truetype(FONT_BOLD, 16)
-        league_font = ImageFont.truetype(FONT_PATH, 13)
-        name_font = ImageFont.truetype(FONT_SEMIBOLD, 12)
-        mgr_font = ImageFont.truetype(FONT_REGULAR, 10)
-        footer_font = ImageFont.truetype(FONT_PATH, 11)
+        league_font = ImageFont.truetype(FONT_BOLD, 15)
+        name_font = ImageFont.truetype(FONT_SEMIBOLD, 13)
+        mgr_font = ImageFont.truetype(FONT_REGULAR, 12)
+        footer_font = ImageFont.truetype(FONT_PATH, 13)
     except Exception as e:
         logger.error(f"Error loading fonts for GW summary: {e}")
         return None
@@ -950,7 +981,7 @@ def generate_gw_summary_image(gw_number, league_name, captains_data, transfers_i
     draw.rectangle([0, 0, img_width, header_height], fill=TABLE_HEADER_BG)
     draw.text((padding_x, (header_height - 16) // 2), f"Gameweek {gw_number} Summary", font=header_font, fill=TABLE_TEXT_BLACK)
     # League name right-aligned
-    draw.text((img_width - padding_x, (header_height - 13) // 2), league_name, font=league_font, fill=TABLE_TEXT_MUTED, anchor="ra")
+    draw.text((img_width - padding_x, (header_height - 15) // 2), league_name, font=league_font, fill=TABLE_TEXT_MUTED, anchor="ra")
     draw.line([(0, header_height), (img_width, header_height)], fill=TABLE_BORDER, width=1)
 
     # Captain choices section
@@ -1039,13 +1070,13 @@ def generate_recap_image(gw_number, league_name, shame_data, praise_data):
     """
     try:
         header_font = ImageFont.truetype(FONT_BOLD, 16)
-        league_font = ImageFont.truetype(FONT_PATH, 13)
+        league_font = ImageFont.truetype(FONT_BOLD, 15)
         section_font = ImageFont.truetype(FONT_BOLD, 13)
         card_cat_font = ImageFont.truetype(FONT_SEMIBOLD, 11)
         card_name_font = ImageFont.truetype(FONT_SEMIBOLD, 14)
         card_detail_font = ImageFont.truetype(FONT_PATH, 13)
         card_value_font = ImageFont.truetype(FONT_BOLD, 14)
-        footer_font = ImageFont.truetype(FONT_PATH, 11)
+        footer_font = ImageFont.truetype(FONT_PATH, 13)
     except Exception as e:
         logger.error(f"Error loading fonts for recap: {e}")
         return None
@@ -1074,7 +1105,7 @@ def generate_recap_image(gw_number, league_name, shame_data, praise_data):
     # Header
     draw.rectangle([0, 0, img_width, header_height], fill=TABLE_HEADER_BG)
     draw.text((padding_x, (header_height - 16) // 2), f"Gameweek {gw_number} Recap", font=header_font, fill=TABLE_TEXT_BLACK)
-    draw.text((img_width - padding_x, (header_height - 13) // 2), league_name, font=league_font, fill=TABLE_TEXT_MUTED, anchor="ra")
+    draw.text((img_width - padding_x, (header_height - 15) // 2), league_name, font=league_font, fill=TABLE_TEXT_MUTED, anchor="ra")
     draw.line([(0, header_height), (img_width, header_height)], fill=TABLE_BORDER, width=1)
 
     y = header_height

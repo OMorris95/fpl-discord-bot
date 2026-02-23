@@ -705,9 +705,13 @@ async def toggle_transfer_alerts(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(manage_channels=True)
 async def toggle_auto_gw(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    if not await asyncio.to_thread(is_goal_subscribed, interaction.channel_id):
-        await interaction.followup.send("Goal alerts must be enabled first with `/toggle_goals` before you can enable this.", ephemeral=True)
+    league_id = get_league_id_for_context(interaction)
+    if not league_id:
+        await interaction.followup.send("A league must be configured for this channel or server first. Use `/setleague`.", ephemeral=True)
         return
+    # Ensure a subscription row exists (create with goal alerts off if needed)
+    if not await asyncio.to_thread(is_goal_subscribed, interaction.channel_id):
+        await asyncio.to_thread(add_goal_subscription, interaction.channel_id, league_id)
     enabled = await asyncio.to_thread(is_auto_post_enabled, interaction.channel_id, 'gw')
     await asyncio.to_thread(set_auto_post_subscription, interaction.channel_id, 'gw', not enabled)
     if enabled:
@@ -719,9 +723,13 @@ async def toggle_auto_gw(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(manage_channels=True)
 async def toggle_auto_recap(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    if not await asyncio.to_thread(is_goal_subscribed, interaction.channel_id):
-        await interaction.followup.send("Goal alerts must be enabled first with `/toggle_goals` before you can enable this.", ephemeral=True)
+    league_id = get_league_id_for_context(interaction)
+    if not league_id:
+        await interaction.followup.send("A league must be configured for this channel or server first. Use `/setleague`.", ephemeral=True)
         return
+    # Ensure a subscription row exists (create with goal alerts off if needed)
+    if not await asyncio.to_thread(is_goal_subscribed, interaction.channel_id):
+        await asyncio.to_thread(add_goal_subscription, interaction.channel_id, league_id)
     enabled = await asyncio.to_thread(is_auto_post_enabled, interaction.channel_id, 'recap')
     await asyncio.to_thread(set_auto_post_subscription, interaction.channel_id, 'recap', not enabled)
     if enabled:
@@ -1006,6 +1014,8 @@ async def team(interaction: discord.Interaction, manager: str = None):
     live_data = bot.live_fpl_data
     if not live_data or live_data.get('gw') != current_gw:
         live_data = await backend_get_live_data(session, current_gw)
+        if live_data:
+            live_data['gw'] = current_gw
 
     if not live_data:
         await interaction.followup.send(f"Could not fetch data for Gameweek {current_gw}.")
@@ -1036,10 +1046,10 @@ async def team(interaction: discord.Interaction, manager: str = None):
         for mgr in league_data.get('standings', {}).get('results', [])
     ]
     all_manager_data = await asyncio.gather(*tasks)
-    
+
     manager_live_scores = [d for d in all_manager_data if d is not None]
     manager_live_scores.sort(key=lambda x: x['live_total_points'], reverse=True)
-    
+
     live_rank = "N/A"
     selected_manager_details = None
     for i, mgr_data in enumerate(manager_live_scores):
@@ -1047,7 +1057,7 @@ async def team(interaction: discord.Interaction, manager: str = None):
             live_rank = i + 1
             selected_manager_details = mgr_data
             break
-    
+
     if not selected_manager_details:
         await interaction.followup.send("Could not calculate live data for the selected manager.")
         return
@@ -1064,7 +1074,7 @@ async def team(interaction: discord.Interaction, manager: str = None):
         "live": live_data,
         "picks": selected_manager_details['picks_data']
     }
-    
+
     image_bytes = await asyncio.to_thread(generate_team_image, fpl_data_for_image, summary_data, is_finished=is_finished)
     if image_bytes:
         file = discord.File(fp=image_bytes, filename="fpl_team.png")
@@ -1122,6 +1132,8 @@ async def table(interaction: discord.Interaction):
     live_data = bot.live_fpl_data
     if not live_data or live_data.get('gw') != current_gw:
         live_data = await backend_get_live_data(session, current_gw)
+        if live_data:
+            live_data['gw'] = current_gw
 
     if not live_data:
         await interaction.followup.send(f"Could not fetch data for Gameweek {current_gw}.")
