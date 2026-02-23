@@ -663,6 +663,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 # --- DISCORD SLASH COMMANDS ---
 
 @bot.tree.command(name="toggle_goals", description="Enable or disable live goal alerts in this channel.")
+@app_commands.default_permissions(manage_channels=True)
 @app_commands.checks.has_permissions(manage_channels=True)
 async def toggle_goals(interaction: discord.Interaction):
     """Toggles goal alerts for the current channel."""
@@ -682,6 +683,7 @@ async def toggle_goals(interaction: discord.Interaction):
         await interaction.followup.send("🟢 Live goal alerts enabled. I will post goals as they happen.")
 
 @bot.tree.command(name="toggle_transfer_alerts", description="Enable or disable transfer flop alerts in this channel.")
+@app_commands.default_permissions(manage_channels=True)
 @app_commands.checks.has_permissions(manage_channels=True)
 async def toggle_transfer_alerts(interaction: discord.Interaction):
     """Toggles transfer flop alerts for the current channel."""
@@ -702,6 +704,7 @@ async def toggle_transfer_alerts(interaction: discord.Interaction):
         await interaction.followup.send("🟢 Transfer flop alerts enabled for this channel.")
 
 @bot.tree.command(name="toggle_auto_gw", description="Toggle auto-posting of GW summary when a new gameweek starts.")
+@app_commands.default_permissions(manage_channels=True)
 @app_commands.checks.has_permissions(manage_channels=True)
 async def toggle_auto_gw(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -720,6 +723,7 @@ async def toggle_auto_gw(interaction: discord.Interaction):
         await interaction.followup.send("🟢 Auto GW summary posting enabled — a summary image will be posted when each gameweek starts.")
 
 @bot.tree.command(name="toggle_auto_recap", description="Toggle auto-posting of GW recap when a gameweek finishes.")
+@app_commands.default_permissions(manage_channels=True)
 @app_commands.checks.has_permissions(manage_channels=True)
 async def toggle_auto_recap(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -738,6 +742,8 @@ async def toggle_auto_recap(interaction: discord.Interaction):
         await interaction.followup.send("🟢 Auto GW recap posting enabled — a recap image will be posted when each gameweek finishes.")
 
 @bot.tree.command(name="setleague", description="Configure which FPL league this server or channel uses.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(league_id="The FPL league ID (numbers only).",
                        scope="Apply this league to the whole server or just this channel.")
 @app_commands.choices(scope=[
@@ -839,6 +845,7 @@ class AdminApprovalView(discord.ui.View):
         await new_user.send(f"Your claim for **{team_data['team_name']}** in the server **{interaction.guild.name}** was denied.")
 
 @bot.tree.command(name="setadminchannel", description="Sets the channel for admin notifications.")
+@app_commands.default_permissions(manage_guild=True)
 @app_commands.describe(channel="The channel to be used for admin notifications.")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setadminchannel(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -924,6 +931,7 @@ async def claim_autocomplete(interaction: discord.Interaction, current: str):
     return choices
 
 @bot.tree.command(name="assign", description="Manually assign an FPL team to a Discord user.")
+@app_commands.default_permissions(manage_guild=True)
 @app_commands.describe(user="The Discord user to assign the team to.", team="The FPL team to assign.")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def assign(interaction: discord.Interaction, user: discord.User, team: str):
