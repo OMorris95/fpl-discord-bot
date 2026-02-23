@@ -339,20 +339,30 @@ class FPLBot(commands.Bot):
                     'opponent_name': all_teams.get(opponent_id, {}).get('name', 'Unknown'),
                 }
 
-            # --- Helper to find owners/benched for a player in a channel ---
-            def _find_owners(player_id, cache_key):
-                owners, benched = [], []
+            # --- Helper to find owners/benched/captains for a player in a channel ---
+            def _find_managers(player_id, cache_key):
+                owners, captains, triple_captains, benched = [], [], [], []
                 for user_id, picks in self.picks_cache.get(cache_key, {}).items():
+                    active_chip = picks.get('active_chip')
                     for pick in picks.get('picks', []):
                         if pick['element'] == player_id:
                             if pick['position'] <= 11:
-                                owners.append(f"<@{user_id}>")
+                                if pick.get('is_captain'):
+                                    if active_chip == '3xc':
+                                        triple_captains.append(f"<@{user_id}>")
+                                    else:
+                                        captains.append(f"<@{user_id}>")
+                                else:
+                                    owners.append(f"<@{user_id}>")
                             else:
                                 benched.append(f"<@{user_id}>")
-                return owners, benched
+                return owners, captains, triple_captains, benched
 
-            # --- Send alerts for each event type ---
-            async def _broadcast_embed(embed, player_id, all_subs, include_transfers=False):
+            # --- Build and send plain text alerts ---
+            async def _broadcast_alert(event_type, player_id, ctx, all_subs):
+                name = ctx['player']['web_name']
+                opponent = ctx['opponent_name']
+
                 for sub in all_subs:
                     channel = self.get_channel(int(sub['channel_id']))
                     if not channel or not channel.guild:
@@ -362,66 +372,73 @@ class FPLBot(commands.Bot):
                     league_id = sub['league_id']
                     cache_key = (league_id, channel.guild.id)
 
-                    owners, benched = _find_owners(player_id, cache_key)
+                    owners, captains, triple_captains, benched = _find_managers(player_id, cache_key)
 
                     transferors = []
-                    if include_transfers and transfer_alerts_on:
+                    if event_type == 'goal' and transfer_alerts_on:
                         for user_id, transfers in self.transfers_cache.get(cache_key, {}).items():
                             for transfer in [t for t in transfers if t.get('event') == current_gw]:
                                 if transfer['element_out'] == player_id:
                                     transferors.append(f"<@{user_id}>")
 
-                    if owners or benched or transferors:
-                        e = embed.copy()
+                    if not (owners or captains or triple_captains or benched or transferors):
+                        continue
+
+                    lines = []
+
+                    if event_type == 'goal':
+                        lines.append(f"💥 **{name} scores against {opponent}** 💥")
+                        if captains:
+                            lines.append(f"Captained by {', '.join(captains)} 🤑")
+                        if triple_captains:
+                            lines.append(f"👑 **TRIPLE CAPTAINED** 👑 by {', '.join(triple_captains)}")
                         if owners:
-                            e.add_field(name="Owned By", value=", ".join(owners), inline=False)
-                        if benched:
-                            e.add_field(name="Benched By (🤡)", value=", ".join(benched), inline=False)
+                            lines.append(f"Owned by {', '.join(owners)}")
                         if transferors:
-                            e.add_field(name="🤣 Transferred Out By", value=", ".join(transferors), inline=False)
-                        try:
-                            await channel.send(embed=e)
-                        except discord.HTTPException as exc:
-                            logger.warning(f"Failed to send alert to channel {channel.id}: {exc}")
+                            lines.append(f"Shouldn't have sold him {', '.join(transferors)} 🫵 🤣")
+                        if benched:
+                            lines.append(f"Benched by {', '.join(benched)} 🤡")
+
+                    elif event_type == 'assist':
+                        lines.append(f"🔥 **Assist for {name}** 🔥")
+                        if triple_captains:
+                            lines.append(f"👑 **TRIPLE CAPTAINED** 👑 by {', '.join(triple_captains)}")
+                        if captains:
+                            lines.append(f"Captained by {', '.join(captains)} 🤑")
+                        if owners:
+                            lines.append(f"Owned by {', '.join(owners)}")
+                        if benched:
+                            lines.append(f"Benched by {', '.join(benched)} 🤡")
+
+                    elif event_type == 'red_card':
+                        everyone = owners + captains + triple_captains
+                        lines.append(f"🚨 **RED CARD {name}** 🚨 Not looking great for {', '.join(everyone)} 😬" if everyone else f"🚨 **RED CARD {name}** 🚨")
+                        if benched:
+                            lines.append(f"Lucky escape for {', '.join(benched)} 😅")
+
+                    msg = "\n".join(lines)
+                    try:
+                        await channel.send(msg)
+                    except discord.HTTPException as exc:
+                        logger.warning(f"Failed to send alert to channel {channel.id}: {exc}")
 
             # Process goal events
             for player_id, goals_scored in new_goal_events:
                 ctx = _get_player_context(player_id)
-                if not ctx:
-                    continue
-                team_short = ctx['team']['short_name'] if ctx['team'] else '???'
-                embed = discord.Embed(
-                    title=f"⚽ GOAL: {ctx['player']['web_name']} ({team_short})",
-                    description=f"Scored {goals_scored} goal(s) against **{ctx['opponent_name']}**!",
-                    color=discord.Color.green()
-                )
-                await _broadcast_embed(embed, player_id, all_subs, include_transfers=True)
+                if ctx:
+                    await _broadcast_alert('goal', player_id, ctx, all_subs)
 
             # Process assist events
             for player_id, assists_count in new_assist_events:
                 ctx = _get_player_context(player_id)
-                if not ctx:
-                    continue
-                team_short = ctx['team']['short_name'] if ctx['team'] else '???'
-                embed = discord.Embed(
-                    title=f"🅰️ ASSIST: {ctx['player']['web_name']} ({team_short})",
-                    description=f"Provided {assists_count} assist(s) against **{ctx['opponent_name']}**!",
-                    color=discord.Color.blue()
-                )
-                await _broadcast_embed(embed, player_id, all_subs, include_transfers=False)
+                if ctx:
+                    await _broadcast_alert('assist', player_id, ctx, all_subs)
 
             # Process red card events
             for (player_id,) in new_red_card_events:
                 ctx = _get_player_context(player_id)
-                if not ctx:
-                    continue
-                team_short = ctx['team']['short_name'] if ctx['team'] else '???'
-                embed = discord.Embed(
-                    title=f"🟥 RED CARD: {ctx['player']['web_name']} ({team_short})",
-                    description=f"Sent off against **{ctx['opponent_name']}**!",
-                    color=discord.Color.red()
-                )
-                await _broadcast_embed(embed, player_id, all_subs, include_transfers=False)
+                if ctx:
+                    await _broadcast_alert('red_card', player_id, ctx, all_subs)
 
         except Exception as e:
             logger.error(f"Error in live_alert_loop: {e}", exc_info=True)
@@ -794,6 +811,7 @@ async def toggle_transfer_alerts(interaction: discord.Interaction):
     else:
         await asyncio.to_thread(set_transfer_alert_subscription, interaction.channel_id, True)
         await interaction.followup.send("🟢 Transfer flop alerts enabled for this channel.")
+
 
 @bot.tree.command(name="toggle_auto_gw", description="Toggle auto-posting of GW summary when a new gameweek starts.")
 @app_commands.default_permissions(manage_channels=True)
