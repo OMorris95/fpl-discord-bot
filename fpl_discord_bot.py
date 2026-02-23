@@ -741,17 +741,17 @@ async def toggle_auto_recap(interaction: discord.Interaction):
 @app_commands.describe(league_id="The FPL league ID (numbers only).",
                        scope="Apply this league to the whole server or just this channel.")
 @app_commands.choices(scope=[
-    app_commands.Choice(name="Server-wide (default)", value="server"),
+    app_commands.Choice(name="Server-wide", value="server"),
     app_commands.Choice(name="This channel only", value="channel")
 ])
-async def setleague(interaction: discord.Interaction, league_id: int, scope: str = "server"):
+async def setleague(interaction: discord.Interaction, league_id: int, scope: app_commands.Choice[str]):
     await interaction.response.defer(ephemeral=True)
 
     if not interaction.guild:
         await interaction.followup.send("This command can only be used inside a server.")
         return
 
-    scope_value = scope or "server"
+    scope_value = scope.value
     permissions = interaction.user.guild_permissions
     # Check permissions: Allow Manage Guild/Channels, Administrator, or Server Owner
     is_server_owner = interaction.user.id == interaction.guild.owner_id
