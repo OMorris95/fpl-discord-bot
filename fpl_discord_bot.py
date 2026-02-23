@@ -537,9 +537,9 @@ class FPLBot(commands.Bot):
         managers = league_data.get('standings', {}).get('results', [])
         league_name = league_data.get('league', {}).get('name', 'League')
 
-        # Compute metrics for each manager
-        shame = {'most_benched': None, 'worst_captain': None, 'transfer_flop': None}
-        praise = {'highest_score': None, 'best_captain': None, 'best_transfer': None}
+        # Compute metrics for each manager (lists to capture all ties)
+        shame = {'most_benched': [], 'worst_captain': [], 'transfer_flop': []}
+        praise = {'highest_score': [], 'best_captain': [], 'best_transfer': []}
 
         for manager in managers:
             mid = manager['entry']
@@ -553,8 +553,11 @@ class FPLBot(commands.Bot):
             gw_score = entry_hist.get('points', 0) - entry_hist.get('event_transfers_cost', 0)
 
             # Highest GW score (praise)
-            if not praise['highest_score'] or gw_score > praise['highest_score']['value']:
-                praise['highest_score'] = {'manager_name': mgr_name, 'value': gw_score}
+            cur = praise['highest_score']
+            if not cur or gw_score > cur[0]['value']:
+                praise['highest_score'] = [{'manager_name': mgr_name, 'value': gw_score}]
+            elif gw_score == cur[0]['value']:
+                cur.append({'manager_name': mgr_name, 'value': gw_score})
 
             # Captain analysis
             captain_pick = next((p for p in picks_data.get('picks', []) if p['is_captain']), None)
@@ -563,20 +566,31 @@ class FPLBot(commands.Bot):
                 captain_player = all_players.get(captain_pick['element'], {})
                 captain_name = captain_player.get('web_name', '?')
 
-                # Worst captain (shame)
-                if not shame['worst_captain'] or captain_pts < shame['worst_captain']['value']:
-                    shame['worst_captain'] = {'manager_name': mgr_name, 'value': captain_pts, 'player_name': captain_name}
-                # Best captain (praise)
-                if not praise['best_captain'] or captain_pts > praise['best_captain']['value']:
-                    praise['best_captain'] = {'manager_name': mgr_name, 'value': captain_pts, 'player_name': captain_name}
+                # Worst captain (shame) — lower is worse
+                cur = shame['worst_captain']
+                if not cur or captain_pts < cur[0]['value']:
+                    shame['worst_captain'] = [{'manager_name': mgr_name, 'value': captain_pts, 'player_name': captain_name}]
+                elif captain_pts == cur[0]['value']:
+                    cur.append({'manager_name': mgr_name, 'value': captain_pts, 'player_name': captain_name})
+
+                # Best captain (praise) — higher is better
+                cur = praise['best_captain']
+                if not cur or captain_pts > cur[0]['value']:
+                    praise['best_captain'] = [{'manager_name': mgr_name, 'value': captain_pts, 'player_name': captain_name}]
+                elif captain_pts == cur[0]['value']:
+                    cur.append({'manager_name': mgr_name, 'value': captain_pts, 'player_name': captain_name})
 
             # Bench points (shame: most benched)
             bench_pts = sum(
                 live_points_map.get(p['element'], {}).get('total_points', 0)
                 for p in picks_data.get('picks', []) if p['position'] > 11
             )
-            if bench_pts > 0 and (not shame['most_benched'] or bench_pts > shame['most_benched']['value']):
-                shame['most_benched'] = {'manager_name': mgr_name, 'value': bench_pts}
+            if bench_pts > 0:
+                cur = shame['most_benched']
+                if not cur or bench_pts > cur[0]['value']:
+                    shame['most_benched'] = [{'manager_name': mgr_name, 'value': bench_pts}]
+                elif bench_pts == cur[0]['value']:
+                    cur.append({'manager_name': mgr_name, 'value': bench_pts})
 
             # Transfer analysis
             transfer_info = all_transfers.get(mid, {})
@@ -585,15 +599,23 @@ class FPLBot(commands.Bot):
                 pout = t.get('element_out')
                 out_pts = live_points_map.get(pout, {}).get('total_points', 0)
                 out_player = all_players.get(pout, {})
-                if out_pts > 0 and (not shame['transfer_flop'] or out_pts > shame['transfer_flop']['value']):
-                    shame['transfer_flop'] = {'manager_name': mgr_name, 'value': out_pts, 'player_name': out_player.get('web_name', '?')}
+                if out_pts > 0:
+                    cur = shame['transfer_flop']
+                    if not cur or out_pts > cur[0]['value']:
+                        shame['transfer_flop'] = [{'manager_name': mgr_name, 'value': out_pts, 'player_name': out_player.get('web_name', '?')}]
+                    elif out_pts == cur[0]['value']:
+                        cur.append({'manager_name': mgr_name, 'value': out_pts, 'player_name': out_player.get('web_name', '?')})
 
                 # Best transfer in (praise): highest points scored by player bought
                 pin = t.get('element_in')
                 in_pts = live_points_map.get(pin, {}).get('total_points', 0)
                 in_player = all_players.get(pin, {})
-                if in_pts > 0 and (not praise['best_transfer'] or in_pts > praise['best_transfer']['value']):
-                    praise['best_transfer'] = {'manager_name': mgr_name, 'value': in_pts, 'player_name': in_player.get('web_name', '?')}
+                if in_pts > 0:
+                    cur = praise['best_transfer']
+                    if not cur or in_pts > cur[0]['value']:
+                        praise['best_transfer'] = [{'manager_name': mgr_name, 'value': in_pts, 'player_name': in_player.get('web_name', '?')}]
+                    elif in_pts == cur[0]['value']:
+                        cur.append({'manager_name': mgr_name, 'value': in_pts, 'player_name': in_player.get('web_name', '?')})
 
         return generate_recap_image(gw, league_name, shame, praise)
 

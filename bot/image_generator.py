@@ -1065,10 +1065,23 @@ SHAME_BG = "#FEF2F2"    # subtle red
 PRAISE_BG = "#F0FDF4"   # subtle green
 
 
-def _draw_metric_card(draw, x, y, width, category, manager_name, detail, value_str, value_color, fonts):
-    """Draw a single metric card (rounded rect with category, manager, detail, value)."""
+def _draw_metric_card(draw, x, y, width, category, manager_names, detail, value_str, value_color, fonts):
+    """Draw a single metric card (rounded rect with category, managers, detail, value).
+
+    Args:
+        manager_names: list of manager name strings (will be shown two per row)
+    """
+    import math
     card_font_cat, card_font_name, card_font_detail, card_font_value = fonts
-    height = 56
+
+    if isinstance(manager_names, str):
+        manager_names = [manager_names]
+
+    name_rows = math.ceil(len(manager_names) / 2)
+    row_line_h = 18
+    base_height = 56
+    extra = max(0, name_rows - 1) * row_line_h
+    height = base_height + extra
 
     # Card background
     _draw_rounded_rect(draw, [x, y, x + width, y + height], 8, fill="#FFFFFF", outline=TABLE_BORDER)
@@ -1076,8 +1089,15 @@ def _draw_metric_card(draw, x, y, width, category, manager_name, detail, value_s
     # Category label (top-left)
     draw.text((x + 16, y + 8), category, font=card_font_cat, fill=TABLE_TEXT_MUTED)
 
-    # Manager name (bottom-left)
-    draw.text((x + 16, y + 28), manager_name, font=card_font_name, fill=TABLE_TEXT_BLACK)
+    # Manager names (two columns per row)
+    col1_x = x + 16
+    col2_x = x + 16 + 130  # fixed gap between the two name columns
+    name_y = y + 28
+    for i in range(0, len(manager_names), 2):
+        draw.text((col1_x, name_y), manager_names[i], font=card_font_name, fill=TABLE_TEXT_BLACK)
+        if i + 1 < len(manager_names):
+            draw.text((col2_x, name_y), manager_names[i + 1], font=card_font_name, fill=TABLE_TEXT_BLACK)
+        name_y += row_line_h
 
     # Detail text (center-right area, if present)
     if detail:
@@ -1116,20 +1136,64 @@ def generate_recap_image(gw_number, league_name, shame_data, praise_data):
         logger.error(f"Error loading fonts for recap: {e}")
         return None
 
+    import math
+
     img_width = 480
     padding_x = 20
     header_height = 48
     section_header_h = 28
-    card_height = 56
+    base_card_height = 56
+    row_line_h = 18
     card_gap = 8
     section_padding = 16
     footer_height = 36
     card_width = img_width - 2 * padding_x
     card_fonts = (card_cat_font, card_name_font, card_detail_font, card_value_font)
 
-    # Fixed height: header + 2 sections (header + 3 cards + padding each) + footer
-    section_content_h = section_header_h + section_padding // 2 + 3 * card_height + 2 * card_gap + section_padding
-    img_height = header_height + section_content_h * 2 + footer_height + 2
+    def _prep_metric(category, data):
+        """Prepare display data for a metric, return (manager_names_list, detail, value_str, card_h)."""
+        if data:
+            names = [d['manager_name'] for d in data]
+            unique_players = list(dict.fromkeys(d.get('player_name', '') for d in data if d.get('player_name')))
+            player_str = ", ".join(unique_players)
+            if 'captain' in category.lower() and player_str:
+                detail = f"(C) {player_str}"
+            elif 'transfer' in category.lower() and player_str:
+                prefix = "Sold" if 'flop' in category.lower() else "Bought"
+                detail = f"{prefix} {player_str}"
+            else:
+                detail = player_str
+            value_str = f"{data[0]['value']} pts"
+            name_rows = math.ceil(len(names) / 2)
+            card_h = base_card_height + max(0, name_rows - 1) * row_line_h
+        else:
+            names = ["-"]
+            detail = ""
+            value_str = "No data"
+            card_h = base_card_height
+        return names, detail, value_str, card_h
+
+    # Pre-compute all metrics to get dynamic heights
+    shame_metrics_raw = [
+        ('MOST POINTS BENCHED', shame_data.get('most_benched', [])),
+        ('WORST CAPTAIN', shame_data.get('worst_captain', [])),
+        ('BIGGEST TRANSFER FLOP', shame_data.get('transfer_flop', [])),
+    ]
+    praise_metrics_raw = [
+        ('HIGHEST GW SCORE', praise_data.get('highest_score', [])),
+        ('BEST CAPTAIN', praise_data.get('best_captain', [])),
+        ('BEST TRANSFER IN', praise_data.get('best_transfer', [])),
+    ]
+
+    shame_prepared = [_prep_metric(cat, data) for cat, data in shame_metrics_raw]
+    praise_prepared = [_prep_metric(cat, data) for cat, data in praise_metrics_raw]
+
+    shame_cards_h = sum(p[3] for p in shame_prepared) + 2 * card_gap
+    praise_cards_h = sum(p[3] for p in praise_prepared) + 2 * card_gap
+    shame_section_h = section_header_h + section_padding // 2 + shame_cards_h + section_padding
+    praise_section_h = section_header_h + section_padding // 2 + praise_cards_h + section_padding
+
+    img_height = header_height + shame_section_h + praise_section_h + footer_height + 2
 
     img = Image.new("RGBA", (img_width, img_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -1146,61 +1210,24 @@ def generate_recap_image(gw_number, league_name, shame_data, praise_data):
     y = header_height
 
     # --- SHAME SECTION ---
-    # Section background
-    shame_section_h = section_content_h
     draw.rectangle([0, y, img_width, y + shame_section_h], fill=SHAME_BG)
-
-    # Section header
     draw.text((img_width // 2, y + section_header_h // 2), "WALL OF SHAME", font=section_font, fill=TABLE_RANK_DOWN, anchor="mm")
     y += section_header_h + section_padding // 2
 
-    # Shame metric definitions
-    shame_metrics = [
-        ('MOST POINTS BENCHED', shame_data.get('most_benched')),
-        ('WORST CAPTAIN', shame_data.get('worst_captain')),
-        ('BIGGEST TRANSFER FLOP', shame_data.get('transfer_flop')),
-    ]
-    for category, data in shame_metrics:
-        if data:
-            detail = f"(C) {data.get('player_name', '')}" if data.get('player_name') and 'captain' in category.lower() else data.get('player_name', '')
-            if category == 'BIGGEST TRANSFER FLOP' and data.get('player_name'):
-                detail = f"Sold {data['player_name']}"
-            value_str = f"{data['value']} pts"
-        else:
-            detail = ""
-            value_str = "No data"
-        manager = data['manager_name'] if data else "-"
-        _draw_metric_card(draw, padding_x, y, card_width, category, manager, detail, value_str, TABLE_RANK_DOWN, card_fonts)
-        y += card_height + card_gap
+    for (cat, _), (names, detail, value_str, card_h) in zip(shame_metrics_raw, shame_prepared):
+        _draw_metric_card(draw, padding_x, y, card_width, cat, names, detail, value_str, TABLE_RANK_DOWN, card_fonts)
+        y += card_h + card_gap
 
     y = header_height + shame_section_h
 
     # --- PRAISE SECTION ---
-    praise_section_h = section_content_h
     draw.rectangle([0, y, img_width, y + praise_section_h], fill=PRAISE_BG)
-
-    # Section header
     draw.text((img_width // 2, y + section_header_h // 2), "HALL OF FAME", font=section_font, fill=TABLE_RANK_UP, anchor="mm")
     y += section_header_h + section_padding // 2
 
-    # Praise metric definitions
-    praise_metrics = [
-        ('HIGHEST GW SCORE', praise_data.get('highest_score')),
-        ('BEST CAPTAIN', praise_data.get('best_captain')),
-        ('BEST TRANSFER IN', praise_data.get('best_transfer')),
-    ]
-    for category, data in praise_metrics:
-        if data:
-            detail = f"(C) {data.get('player_name', '')}" if data.get('player_name') and 'captain' in category.lower() else data.get('player_name', '')
-            if category == 'BEST TRANSFER IN' and data.get('player_name'):
-                detail = f"Bought {data['player_name']}"
-            value_str = f"{data['value']} pts"
-        else:
-            detail = ""
-            value_str = "No data"
-        manager = data['manager_name'] if data else "-"
-        _draw_metric_card(draw, padding_x, y, card_width, category, manager, detail, value_str, TABLE_RANK_UP, card_fonts)
-        y += card_height + card_gap
+    for (cat, _), (names, detail, value_str, card_h) in zip(praise_metrics_raw, praise_prepared):
+        _draw_metric_card(draw, padding_x, y, card_width, cat, names, detail, value_str, TABLE_RANK_UP, card_fonts)
+        y += card_h + card_gap
 
     # Footer
     footer_y = header_height + shame_section_h + praise_section_h
