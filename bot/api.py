@@ -5,6 +5,65 @@ from bot.logging_config import get_logger
 logger = get_logger('api')
 
 
+def predict_bonus(gw_fixtures):
+    """Predict bonus points (3/2/1) for in-progress fixtures based on live BPS data.
+
+    Uses the fixture stats array which provides per-fixture BPS.
+    Only predicts for fixtures that have started but are not yet finished_provisional
+    (once provisional, bonus is already baked into total_points by the FPL API).
+
+    Returns dict of player_id -> predicted bonus (1, 2, or 3).
+    """
+    bonus_map = {}
+    if not gw_fixtures:
+        return bonus_map
+
+    for fixture in gw_fixtures:
+        if not fixture.get('started') or fixture.get('finished_provisional'):
+            continue
+
+        # Find BPS stat in fixture stats array
+        bps_stat = None
+        for stat in fixture.get('stats', []):
+            if stat.get('identifier') == 'bps':
+                bps_stat = stat
+                break
+        if not bps_stat:
+            continue
+
+        # Combine home and away players
+        all_players = (bps_stat.get('h', []) or []) + (bps_stat.get('a', []) or [])
+        if not all_players:
+            continue
+
+        # Sort by BPS descending
+        all_players.sort(key=lambda p: p['value'], reverse=True)
+
+        # Assign 3/2/1 bonus with tie-aware allocation
+        rank = 1
+        i = 0
+        while i < len(all_players) and rank <= 3:
+            current_bps = all_players[i]['value']
+            if current_bps <= 0:
+                break
+
+            # Count players tied at this BPS
+            tie_count = 0
+            while i + tie_count < len(all_players) and all_players[i + tie_count]['value'] == current_bps:
+                tie_count += 1
+
+            # Bonus for this rank: rank 1→3, rank 2→2, rank 3→1
+            bonus = max(0, 4 - rank)
+
+            for j in range(tie_count):
+                bonus_map[all_players[i + j]['element']] = bonus
+
+            rank += tie_count
+            i += tie_count
+
+    return bonus_map
+
+
 async def get_live_manager_details(session, manager_entry, current_gw, live_points_map, all_players_map, live_data,
                                     is_finished=False, cached_picks=None, cached_history=None):
     """Fetches picks/history for a manager and calculates their score, handling auto-subs for finished GWs.
@@ -57,6 +116,10 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
 
         # Helper: check if ALL of a player's team's fixtures have finished (handles DGW)
         gw_fixtures = live_data.get('fixtures', [])
+
+        # Predict bonus points for in-progress fixtures (BPS-based 3/2/1 allocation)
+        bonus_predictions = predict_bonus(gw_fixtures)
+
         def has_team_finished(team_id):
             team_fixtures = [f for f in gw_fixtures if f['team_h'] == team_id or f['team_a'] == team_id]
             if not team_fixtures:
@@ -125,7 +188,12 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
 
         # Calculate points from the determined scoring players
         for p in scoring_picks:
-            player_points = live_points_map.get(p['element'], {}).get('total_points', 0)
+            player_stats = live_points_map.get(p['element'], {})
+            player_points = player_stats.get('total_points', 0)
+            # Only add predicted bonus if FPL hasn't already confirmed bonus for this player.
+            # When bonus is confirmed, stats.bonus > 0 and total_points already includes it.
+            if player_stats.get('bonus', 0) == 0:
+                player_points += bonus_predictions.get(p['element'], 0)
 
             # Start with a base multiplier of 1 for any player in the scoring list
             effective_multiplier = 1

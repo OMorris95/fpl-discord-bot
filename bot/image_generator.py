@@ -250,6 +250,10 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         team_fixture_map[fix['team_h']] = fix
         team_fixture_map[fix['team_a']] = fix
 
+    # Predict bonus for in-progress fixtures
+    from bot.api import predict_bonus
+    bonus_predictions = predict_bonus(live_fixtures)
+
     def get_fixture_text(team_id):
         """Return fixture text like 'ARS (H)' if the player's game hasn't started, else None."""
         fix = team_fixture_map.get(team_id)
@@ -269,7 +273,11 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         player_id = player_pick['element']
         player_info = all_players[player_id]
         player_name = player_info['web_name']
-        base_points = live_points.get(player_id, {}).get('total_points', 0)
+        player_live_stats = live_points.get(player_id, {})
+        base_points = player_live_stats.get('total_points', 0)
+        # Only add predicted bonus if FPL hasn't already confirmed bonus
+        if player_live_stats.get('bonus', 0) == 0:
+            base_points += bonus_predictions.get(player_id, 0)
 
         is_starter = player_pick['position'] <= 11
         was_subbed_out = is_starter and player_id not in scoring_player_ids and is_finished
