@@ -241,7 +241,40 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
     all_teams = {t['id']: t for t in fpl_data['bootstrap']['teams']}
     live_points = {p['id']: p['stats'] for p in fpl_data['live']['elements']}
     width, height = background.size
-    coordinates = calculate_player_coordinates(fpl_data['picks']['picks'], all_players, width, height)
+
+    # Determine the final set of scoring players (must happen before coordinate calc)
+    original_picks = fpl_data['picks']['picks']
+    scoring_picks_data = fpl_data['picks'].get('scoring_picks', [])
+    scoring_player_ids = {p['element'] for p in scoring_picks_data}
+
+    # Build original position lookup for sub detection
+    original_positions = {p['element']: p['position'] for p in original_picks}
+
+    # When finished, swap subbed players so sub-ins appear in starting 11
+    layout_picks = original_picks
+    if is_finished and scoring_player_ids:
+        subbed_out = [(p['element'], p['position']) for p in original_picks
+                      if p['position'] <= 11 and p['element'] not in scoring_player_ids]
+        subbed_in = [(p['element'], p['position']) for p in original_picks
+                     if p['position'] > 11 and p['element'] in scoring_player_ids]
+
+        if subbed_out and subbed_in:
+            subbed_out.sort(key=lambda x: x[1])  # by starter position
+            subbed_in.sort(key=lambda x: x[1])   # by bench order
+
+            position_overrides = {}
+            for (out_id, out_pos), (in_id, in_pos) in zip(subbed_out, subbed_in):
+                position_overrides[in_id] = out_pos   # sub-in takes starter slot
+                position_overrides[out_id] = in_pos   # sub-out goes to bench slot
+
+            layout_picks = []
+            for p in original_picks:
+                mp = dict(p)
+                if mp['element'] in position_overrides:
+                    mp['position'] = position_overrides[mp['element']]
+                layout_picks.append(mp)
+
+    coordinates = calculate_player_coordinates(layout_picks, all_players, width, height)
 
     # Build fixture lookup per team for unstarted games
     live_fixtures = fpl_data['live'].get('fixtures', [])
@@ -265,11 +298,7 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         opp_name = opp_team.get('short_name', '???')
         return f"{opp_name} ({'H' if is_home else 'A'})"
 
-    # Determine the final set of scoring players from the provided data
-    scoring_picks_data = fpl_data['picks'].get('scoring_picks', [])
-    scoring_player_ids = {p['element'] for p in scoring_picks_data}
-
-    for player_pick in fpl_data['picks']['picks']:
+    for player_pick in layout_picks:
         player_id = player_pick['element']
         player_info = all_players[player_id]
         player_name = player_info['web_name']
@@ -279,9 +308,10 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         if player_live_stats.get('bonus', 0) == 0:
             base_points += bonus_predictions.get(player_id, 0)
 
-        is_starter = player_pick['position'] <= 11
-        was_subbed_out = is_starter and player_id not in scoring_player_ids and is_finished
-        was_subbed_in = not is_starter and player_id in scoring_player_ids and is_finished
+        orig_position = original_positions.get(player_id, player_pick['position'])
+        was_starter = orig_position <= 11
+        was_subbed_out = was_starter and player_id not in scoring_player_ids and is_finished
+        was_subbed_in = not was_starter and player_id in scoring_player_ids and is_finished
 
         # Check if this player's game hasn't started yet
         fixture_text = get_fixture_text(player_info['team'])
@@ -327,15 +357,28 @@ def generate_team_image(fpl_data, summary_data, is_finished=False):
         glass_h = (name_box_y + name_box_height) - glass_y
         draw_glass_card(background, glass_x, glass_y, box_width, glass_h)
 
-        # Add visual indicators for subs
-        if was_subbed_out:
-            red_overlay = Image.new("RGBA", asset_img.size, (255, 0, 0, 80))
-            asset_img = Image.alpha_composite(asset_img, red_overlay)
-        if was_subbed_in:
-            green_overlay = Image.new("RGBA", asset_img.size, (0, 255, 0, 80))
-            asset_img = Image.alpha_composite(asset_img, green_overlay)
+        # Sub indicator: tint the glass card area (green=subbed in, red=subbed out)
+        if was_subbed_out or was_subbed_in:
+            tint_color = (255, 0, 0, 80) if was_subbed_out else (0, 255, 0, 80)
+            gx1 = max(0, glass_x)
+            gy1 = max(0, glass_y)
+            gx2 = min(background.width, glass_x + box_width)
+            gy2 = min(background.height, glass_y + glass_h)
+            gw, gh = gx2 - gx1, gy2 - gy1
+            if gw > 0 and gh > 0:
+                region = background.crop((gx1, gy1, gx2, gy2)).convert("RGBA")
+                tint_img = Image.new("RGBA", (gw, gh), tint_color)
+                tinted = Image.alpha_composite(region, tint_img)
+                # Rounded top corners mask (same as glass card)
+                mask = Image.new("L", (gw, gh), 0)
+                mask_draw = ImageDraw.Draw(mask)
+                mask_draw.rounded_rectangle([0, 0, gw - 1, gh - 1], radius=GLASS_CORNER_RADIUS, fill=255)
+                if GLASS_CORNER_RADIUS > 0:
+                    mask_draw.rectangle([0, gh - GLASS_CORNER_RADIUS, GLASS_CORNER_RADIUS, gh], fill=255)
+                    mask_draw.rectangle([gw - GLASS_CORNER_RADIUS, gh - GLASS_CORNER_RADIUS, gw, gh], fill=255)
+                background.paste(tinted, (gx1, gy1), mask)
 
-        # Paste jersey on top of glass card
+        # Paste jersey on top of glass card (clean, no tint on jersey itself)
         background.paste(asset_img, (paste_x, paste_y), asset_img)
 
         name_text = player_name

@@ -13,6 +13,10 @@ logger = get_logger('backend_api')
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3001")
 
 
+def _get_bot_api_key():
+    return os.getenv("BOT_API_KEY", "")
+
+
 class FplUnavailableError(Exception):
     """Raised when the FPL API appears to be updating or unavailable."""
     pass
@@ -184,3 +188,50 @@ async def get_gameweek_info(session: aiohttp.ClientSession, bootstrap_data: dict
         'is_finished': gw_event.get('finished', False),
         'event': gw_event,
     }
+
+
+# =====================================================
+# BOT-SPECIFIC ENDPOINTS (authenticated with BOT_API_KEY)
+# =====================================================
+
+async def _bot_get(session: aiohttp.ClientSession, path: str):
+    """Make an authenticated GET request to the bot API endpoints."""
+    url = f"{BACKEND_URL}{path}"
+    headers = {"Authorization": f"Bearer {_get_bot_api_key()}"}
+    try:
+        async with session.get(url, headers=headers) as response:
+            if response.status == 200:
+                return await response.json()
+            elif response.status == 404:
+                return None
+            else:
+                logger.warning(f"Bot API returned {response.status} for {path}")
+                return None
+    except (aiohttp.ClientError, ConnectionError) as e:
+        logger.error(f"Bot API request failed for {path}: {e}")
+        return None
+
+
+async def get_user_by_discord(session: aiohttp.ClientSession, discord_user_id: str) -> dict | None:
+    """Check if a Discord user has a linked website account."""
+    return await _bot_get(session, f"/api/bot/user-by-discord/{discord_user_id}")
+
+
+async def get_deadline_info(session: aiohttp.ClientSession) -> dict | None:
+    """Get current + next gameweek deadline info."""
+    return await _bot_get(session, "/api/bot/deadline-info")
+
+
+async def get_injury_alerts(session: aiohttp.ClientSession, manager_id: int) -> dict | None:
+    """Get flagged players in a manager's squad."""
+    return await _bot_get(session, f"/api/bot/injury-alerts/{manager_id}")
+
+
+async def get_captain_suggestion(session: aiohttp.ClientSession, manager_id: int) -> dict | None:
+    """Get top 3 captain suggestions for a manager."""
+    return await _bot_get(session, f"/api/bot/captain-suggestion/{manager_id}")
+
+
+async def get_transfer_suggestions(session: aiohttp.ClientSession, manager_id: int) -> dict | None:
+    """Get top 3 transfer suggestions for a manager."""
+    return await _bot_get(session, f"/api/bot/transfer-suggestions/{manager_id}")

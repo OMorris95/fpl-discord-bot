@@ -24,6 +24,8 @@ from bot.database import (
     get_auto_post_subscriptions, is_auto_post_enabled,
     set_auto_post_subscription, get_bot_state, set_bot_state,
     get_all_bot_state_keys,
+    upsert_dm_subscription, get_dm_subscription, get_all_dm_subscriptions,
+    delete_dm_subscription, update_dm_last_notified, update_dm_channel_id,
 )
 # Keep get_live_manager_details for live scoring computation (pure logic, no API calls when cached)
 from bot.api import get_live_manager_details
@@ -35,6 +37,12 @@ from bot.backend_api import (
     get_current_gameweek, get_last_completed_gameweek, get_gameweek_info,
     get_element_summary,
     FplUnavailableError,
+    get_user_by_discord, get_deadline_info, get_injury_alerts,
+    get_captain_suggestion, get_transfer_suggestions,
+)
+from bot.dm_features import (
+    DMQueue, build_confirmation_embed, build_deadline_embed,
+    build_injury_embed, build_transfer_embed,
 )
 from bot.image_generator import (
     generate_team_image, generate_dreamteam_image, format_manager_link,
@@ -140,9 +148,12 @@ class FPLBot(commands.Bot):
         for key in get_all_bot_state_keys("gw_"):
             self._auto_posted[key] = True
         self.session = aiohttp.ClientSession()
+        self.dm_queue = DMQueue(self)
         self.live_data_loop.start()
         self.live_alert_loop.start()
         self.gw_state_loop.start()
+        self.notification_loop.start()
+        self.injury_check_loop.start()
         await self.tree.sync()
         logger.info(f"Synced slash commands for {self.user}.")
 
@@ -704,12 +715,175 @@ class FPLBot(commands.Bot):
 
         return generate_recap_image(gw, league_name, shame, praise)
 
+    # =====================================================
+    # DM NOTIFICATION LOOPS (Phase 5)
+    # =====================================================
+
+    @tasks.loop(seconds=60)
+    async def notification_loop(self):
+        """Send deadline reminders with captain/transfer suggestions to DM subscribers."""
+        await self.wait_until_ready()
+        try:
+            info = await get_deadline_info(self.session)
+            if not info or not info.get('next'):
+                return
+
+            next_gw = info['next']
+            deadline_str = next_gw.get('deadline')
+            if not deadline_str:
+                return
+
+            from datetime import datetime, timezone
+            try:
+                deadline = datetime.fromisoformat(deadline_str.replace('Z', '+00:00'))
+            except (ValueError, TypeError):
+                return
+
+            now = datetime.now(timezone.utc)
+            hours_left = (deadline - now).total_seconds() / 3600
+
+            # Only act in specific windows
+            window = None
+            if 2.9 <= hours_left <= 3.1:
+                window = '3h'
+            elif 0.9 <= hours_left <= 1.1:
+                window = '1h'
+
+            if not window:
+                return
+
+            gw_num = next_gw['gameweek']
+            state_key = f"deadline_{window}_gw{gw_num}"
+
+            # Idempotency: skip if already sent
+            if get_bot_state(state_key):
+                return
+
+            # Set state BEFORE sending (prevents duplicates on crash/restart)
+            set_bot_state(state_key, '1')
+
+            subs = get_all_dm_subscriptions()
+            if not subs:
+                return
+
+            logger.info(f"Sending {window} deadline reminders for GW{gw_num} to {len(subs)} subscriber(s)")
+
+            for sub in subs:
+                try:
+                    if not sub.get('deadline_reminder'):
+                        continue
+
+                    user_id = sub['discord_user_id']
+
+                    # Verify premium_plus
+                    user_data = await get_user_by_discord(self.session, user_id)
+                    if not user_data or user_data.get('tier') != 'premium_plus':
+                        continue
+
+                    manager_id = sub['fpl_manager_id']
+                    captain_data = None
+                    transfer_data = None
+
+                    if window == '3h':
+                        # Fetch captain + transfer suggestions for 3h window
+                        if sub.get('captain_suggestion'):
+                            captain_data = await get_captain_suggestion(self.session, manager_id)
+                        if sub.get('transfer_suggestion'):
+                            transfer_data = await get_transfer_suggestions(self.session, manager_id)
+
+                    embed = build_deadline_embed(info, captain_data, transfer_data)
+
+                    self.dm_queue.enqueue(
+                        user_id=int(user_id),
+                        embed=embed,
+                        dm_channel_id=sub.get('dm_channel_id'),
+                        guild_id=sub.get('guild_id'),
+                    )
+                except Exception as e:
+                    logger.error(f"Error preparing deadline DM for {sub.get('discord_user_id')}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in notification_loop: {e}", exc_info=True)
+
+    @notification_loop.before_loop
+    async def before_notification_loop(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(minutes=30)
+    async def injury_check_loop(self):
+        """Check for injury status changes and DM subscribers."""
+        await self.wait_until_ready()
+        try:
+            subs = get_all_dm_subscriptions()
+            if not subs:
+                return
+
+            for sub in subs:
+                try:
+                    if not sub.get('injury_alerts'):
+                        continue
+
+                    user_id = sub['discord_user_id']
+
+                    # Verify premium_plus
+                    user_data = await get_user_by_discord(self.session, user_id)
+                    if not user_data or user_data.get('tier') != 'premium_plus':
+                        continue
+
+                    manager_id = sub['fpl_manager_id']
+                    result = await get_injury_alerts(self.session, manager_id)
+                    if not result:
+                        continue
+
+                    alerts = result.get('alerts', [])
+                    gw = result.get('gameweek', 0)
+
+                    # Build current flagged set for change detection
+                    current_set = frozenset(
+                        f"{a['playerId']}:{a['status']}" for a in alerts
+                    )
+
+                    # Compare against last known state
+                    state_key = f"injuries_{user_id}_{manager_id}"
+                    last_state = get_bot_state(state_key)
+
+                    current_state_str = ','.join(sorted(current_set)) if current_set else ''
+
+                    if last_state == current_state_str:
+                        continue  # No change
+
+                    # State changed — update and notify
+                    set_bot_state(state_key, current_state_str)
+
+                    if not alerts:
+                        continue  # Don't DM when all players become available
+
+                    embed = build_injury_embed(alerts, gw)
+                    self.dm_queue.enqueue(
+                        user_id=int(user_id),
+                        embed=embed,
+                        dm_channel_id=sub.get('dm_channel_id'),
+                        guild_id=sub.get('guild_id'),
+                    )
+
+                except Exception as e:
+                    logger.error(f"Error checking injuries for {sub.get('discord_user_id')}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in injury_check_loop: {e}", exc_info=True)
+
+    @injury_check_loop.before_loop
+    async def before_injury_check_loop(self):
+        await self.wait_until_ready()
+
     async def close(self):
         if self.session:
             await self.session.close()
         self.live_data_loop.cancel()
         self.live_alert_loop.cancel()
         self.gw_state_loop.cancel()
+        self.notification_loop.cancel()
+        self.injury_check_loop.cancel()
         await super().close()
 
     async def on_ready(self):
@@ -1841,6 +2015,92 @@ async def recap(interaction: discord.Interaction):
         await interaction.followup.send(content=link_text, file=file)
     else:
         await interaction.followup.send(f"Could not generate recap for GW {completed_gw}.")
+
+# =====================================================
+# /NOTIFY — DM notification management (Phase 5)
+# =====================================================
+
+@bot.tree.command(name="notify", description="Manage personal DM notifications (Premium+ only).")
+@app_commands.describe(action="Enable, disable, or check status of DM notifications")
+@app_commands.choices(action=[
+    app_commands.Choice(name="enable", value="enable"),
+    app_commands.Choice(name="disable", value="disable"),
+    app_commands.Choice(name="status", value="status"),
+])
+async def notify_command(interaction: discord.Interaction, action: app_commands.Choice[str]):
+    await interaction.response.defer(ephemeral=True)
+
+    user_id = str(interaction.user.id)
+    guild_id = str(interaction.guild_id) if interaction.guild_id else None
+
+    if not guild_id:
+        await interaction.followup.send("This command must be used in a server.")
+        return
+
+    if action.value == "enable":
+        # 1. Check premium_plus via website account
+        user_data = await get_user_by_discord(bot.session, user_id)
+        if not user_data or user_data.get('tier') != 'premium_plus':
+            await interaction.followup.send(
+                "DM notifications require a **Premium+** subscription.\n"
+                f"Upgrade at {WEBSITE_URL}/pricing"
+            )
+            return
+
+        # 2. Get FPL manager ID (from website account, fallback to bot's user_links)
+        fpl_manager_id = user_data.get('fplManagerId')
+        if not fpl_manager_id:
+            fpl_manager_id = get_fpl_id_for_user(guild_id, user_id)
+        if not fpl_manager_id:
+            await interaction.followup.send(
+                "No FPL team linked. Use `/claim` to link your team first, "
+                "or set your FPL Manager ID on the website."
+            )
+            return
+
+        # 3. Upsert subscription
+        upsert_dm_subscription(user_id, guild_id, fpl_manager_id)
+
+        # 4. Send confirmation DM immediately (creates the warm DM channel)
+        try:
+            dm_channel = await interaction.user.create_dm()
+            await dm_channel.send(embed=build_confirmation_embed())
+            # Cache the DM channel ID
+            update_dm_channel_id(user_id, guild_id, str(dm_channel.id))
+            await interaction.followup.send(
+                "DM notifications enabled! Check your DMs for a confirmation message."
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "I couldn't send you a DM. Please enable DMs from server members "
+                "in your Privacy Settings, then try again."
+            )
+            # Clean up the subscription since we can't DM
+            delete_dm_subscription(user_id, guild_id)
+
+    elif action.value == "disable":
+        delete_dm_subscription(user_id, guild_id)
+        await interaction.followup.send("DM notifications disabled. You won't receive any more DMs.")
+
+    elif action.value == "status":
+        sub = get_dm_subscription(user_id, guild_id)
+        if not sub:
+            await interaction.followup.send("You don't have DM notifications enabled. Use `/notify enable` to opt in.")
+            return
+
+        embed = discord.Embed(
+            title="DM Notification Settings",
+            color=0x3498db,
+        )
+        embed.add_field(name="Deadline Reminders", value="On" if sub.get('deadline_reminder') else "Off", inline=True)
+        embed.add_field(name="Injury Alerts", value="On" if sub.get('injury_alerts') else "Off", inline=True)
+        embed.add_field(name="Captain Suggestions", value="On" if sub.get('captain_suggestion') else "Off", inline=True)
+        embed.add_field(name="Transfer Suggestions", value="On" if sub.get('transfer_suggestion') else "Off", inline=True)
+        embed.add_field(name="FPL Manager ID", value=str(sub.get('fpl_manager_id', '?')), inline=True)
+        embed.add_field(name="DM Status", value="Failed" if sub.get('dm_failed') else "Active", inline=True)
+        embed.set_footer(text="LiveFPLStats Premium+")
+        await interaction.followup.send(embed=embed)
+
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:

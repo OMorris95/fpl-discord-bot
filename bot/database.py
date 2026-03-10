@@ -77,11 +77,30 @@ def init_database():
             )
         """)
 
+        # DM subscriptions table (Phase 5: personal DM notifications)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS dm_subscriptions (
+                discord_user_id TEXT NOT NULL,
+                guild_id TEXT NOT NULL,
+                fpl_manager_id INTEGER NOT NULL,
+                deadline_reminder BOOLEAN NOT NULL DEFAULT 1,
+                injury_alerts BOOLEAN NOT NULL DEFAULT 1,
+                captain_suggestion BOOLEAN NOT NULL DEFAULT 1,
+                transfer_suggestion BOOLEAN NOT NULL DEFAULT 0,
+                dm_channel_id TEXT,
+                dm_failed BOOLEAN NOT NULL DEFAULT 0,
+                last_notified_gw INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_user_id, guild_id)
+            )
+        """)
+
         # Create indexes for frequently queried columns
         cur.execute("CREATE INDEX IF NOT EXISTS idx_league_teams_league_id ON league_teams(league_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_links_guild_id ON user_links(guild_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_links_fpl_team_id ON user_links(fpl_team_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_goal_subscriptions_league_id ON goal_subscriptions(league_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_dm_subs_user ON dm_subscriptions(discord_user_id)")
 
         con.commit()
 
@@ -380,3 +399,110 @@ def get_all_bot_state_keys(prefix: str):
     except sqlite3.Error as e:
         logger.error(f"Database error in get_all_bot_state_keys: {e}")
         return []
+
+
+# =====================================================
+# DM SUBSCRIPTIONS (Phase 5: personal DM notifications)
+# =====================================================
+
+def upsert_dm_subscription(discord_user_id: str, guild_id: str, fpl_manager_id: int):
+    """Creates or updates a DM subscription."""
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.cursor()
+            cur.execute("""
+                INSERT OR REPLACE INTO dm_subscriptions
+                    (discord_user_id, guild_id, fpl_manager_id, dm_failed)
+                VALUES (?, ?, ?, 0)
+            """, (str(discord_user_id), str(guild_id), fpl_manager_id))
+            con.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in upsert_dm_subscription: {e}")
+        raise
+
+
+def get_dm_subscription(discord_user_id: str, guild_id: str):
+    """Gets a single DM subscription, or None."""
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+            cur.execute(
+                "SELECT * FROM dm_subscriptions WHERE discord_user_id = ? AND guild_id = ?",
+                (str(discord_user_id), str(guild_id)),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error as e:
+        logger.error(f"Database error in get_dm_subscription: {e}")
+        return None
+
+
+def get_all_dm_subscriptions():
+    """Gets all active (non-failed) DM subscriptions."""
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+            cur.execute("SELECT * FROM dm_subscriptions WHERE dm_failed = 0")
+            return [dict(row) for row in cur.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Database error in get_all_dm_subscriptions: {e}")
+        return []
+
+
+def delete_dm_subscription(discord_user_id: str, guild_id: str):
+    """Deletes a DM subscription."""
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.cursor()
+            cur.execute(
+                "DELETE FROM dm_subscriptions WHERE discord_user_id = ? AND guild_id = ?",
+                (str(discord_user_id), str(guild_id)),
+            )
+            con.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in delete_dm_subscription: {e}")
+        raise
+
+
+def update_dm_last_notified(discord_user_id: str, guild_id: str, gw: int):
+    """Updates the last notified gameweek for a subscription."""
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.cursor()
+            cur.execute(
+                "UPDATE dm_subscriptions SET last_notified_gw = ? WHERE discord_user_id = ? AND guild_id = ?",
+                (gw, str(discord_user_id), str(guild_id)),
+            )
+            con.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in update_dm_last_notified: {e}")
+
+
+def mark_dm_failed(discord_user_id: str, guild_id: str):
+    """Marks a subscription as failed (user has DMs disabled)."""
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.cursor()
+            cur.execute(
+                "UPDATE dm_subscriptions SET dm_failed = 1 WHERE discord_user_id = ? AND guild_id = ?",
+                (str(discord_user_id), str(guild_id)),
+            )
+            con.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in mark_dm_failed: {e}")
+
+
+def update_dm_channel_id(discord_user_id: str, guild_id: str, channel_id: str):
+    """Caches the DM channel ID for a subscription."""
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.cursor()
+            cur.execute(
+                "UPDATE dm_subscriptions SET dm_channel_id = ? WHERE discord_user_id = ? AND guild_id = ?",
+                (str(channel_id), str(discord_user_id), str(guild_id)),
+            )
+            con.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Database error in update_dm_channel_id: {e}")
