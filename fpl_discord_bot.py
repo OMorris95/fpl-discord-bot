@@ -57,6 +57,7 @@ load_dotenv()
 # --- CONFIGURATION ---
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 WEBSITE_URL = os.getenv("WEBSITE_URL", "http://192.168.1.109:5173")
+BOT_LAUNCH_PUBLIC_COMMANDS_ONLY = os.getenv("BOT_LAUNCH_PUBLIC_COMMANDS_ONLY", "true").lower() == "true"
 CONFIG_PATH = Path("config/league_config.json")
 
 def load_league_config():
@@ -154,6 +155,8 @@ class FPLBot(commands.Bot):
         self.gw_state_loop.start()
         self.notification_loop.start()
         self.injury_check_loop.start()
+        if BOT_LAUNCH_PUBLIC_COMMANDS_ONLY:
+            self.tree.remove_command("notify")
         await self.tree.sync()
         logger.info(f"Synced slash commands for {self.user}.")
 
