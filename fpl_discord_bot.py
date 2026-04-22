@@ -1,4 +1,4 @@
-import discord
+﻿import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 import aiohttp
@@ -199,7 +199,7 @@ class FPLBot(commands.Bot):
             if live_data:
                 live_data['gw'] = current_gw
                 live_data['fixtures'] = gw_fixtures
-                live_data['is_finished'] = current_event.get('finished', False)
+                live_data['is_finished'] = current_event.get('finished', False) and current_event.get('data_checked', False)
                 self.live_fpl_data = live_data
                 logger.debug(f"Live data updated for GW {current_gw}. {len(live_fixtures)} fixture(s) in progress.")
             else:
@@ -539,8 +539,8 @@ class FPLBot(commands.Bot):
             get_league_picks(session, league_id, gw),
             get_league_transfers(session, league_id, gw)
         )
-        all_picks = {int(k): v for k, v in (raw_picks or {}).items()}
-        all_transfers = {int(k): v for k, v in (raw_transfers or {}).items()}
+        all_picks = {int(k): v for k, v in (raw_picks or {}).items() if str(k).isdigit()}
+        all_transfers = {int(k): v for k, v in (raw_transfers or {}).items() if str(k).isdigit()}
         all_players = {p['id']: p for p in bootstrap_data.get('elements', [])}
         all_teams = {t['id']: t for t in bootstrap_data.get('teams', [])}
 
@@ -628,8 +628,8 @@ class FPLBot(commands.Bot):
             get_league_picks(session, league_id, gw),
             get_league_transfers(session, league_id, gw)
         )
-        all_picks = {int(k): v for k, v in (raw_picks or {}).items()}
-        all_transfers = {int(k): v for k, v in (raw_transfers or {}).items()}
+        all_picks = {int(k): v for k, v in (raw_picks or {}).items() if str(k).isdigit()}
+        all_transfers = {int(k): v for k, v in (raw_transfers or {}).items() if str(k).isdigit()}
         all_players = {p['id']: p for p in bootstrap_data.get('elements', [])}
         live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
 
@@ -1294,16 +1294,14 @@ async def team(interaction: discord.Interaction, manager: str = None):
         await interaction.followup.send("Could not fetch FPL bootstrap data.")
         return
 
-    gw_event = next((event for event in bootstrap_data.get('events', []) if event['is_current']), None)
-    if not gw_event:
-        gw_event = next((event for event in sorted(bootstrap_data.get('events', []), key=lambda x: x['id'], reverse=True) if event['finished']), None)
-
-    if not gw_event:
+    gw_info = await get_gameweek_info(session, bootstrap_data)
+    if not gw_info:
         await interaction.followup.send("Could not determine the current or last gameweek.")
         return
 
-    current_gw = gw_event['id']
-    is_finished = gw_event['finished']
+    gw_event = gw_info['event']
+    current_gw = gw_info['gw']
+    is_finished = gw_info['is_finished']
 
     # Try to use the live cache if it's for the correct gameweek
     live_data = bot.live_fpl_data
@@ -1326,79 +1324,58 @@ async def team(interaction: discord.Interaction, manager: str = None):
         await interaction.followup.send("Failed to fetch FPL league data.")
         return
 
-    # --- Fetch cached picks and history for all managers ---
-    raw_picks, raw_history = await asyncio.gather(
-        get_league_picks(session, int(league_id), current_gw),
-        get_league_history(session, int(league_id))
-    )
-    cached_picks = {int(k): v for k, v in (raw_picks or {}).items()}
-    cached_history = {int(k): v for k, v in (raw_history or {}).items()}
+    standings_results = league_data.get('standings', {}).get('results', [])
 
-    live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
-    all_players_map = {p['id']: p for p in bootstrap_data.get('elements', [])}
+    # For settled GWs, mirror the website exactly: use official standings totals.
+    if is_finished:
+        raw_picks = await get_league_picks(session, int(league_id), current_gw)
+        cached_picks = {int(k): v for k, v in (raw_picks or {}).items() if str(k).isdigit()}
 
-    tasks = [
-        get_live_manager_details(
-            session, mgr, current_gw, live_points_map, all_players_map, live_data,
-            is_finished=is_finished, cached_picks=cached_picks, cached_history=cached_history
-        )
-        for mgr in league_data.get('standings', {}).get('results', [])
-    ]
-    all_manager_data = await asyncio.gather(*tasks)
-
-    manager_live_scores = [d for d in all_manager_data if d is not None]
-    manager_live_scores.sort(key=lambda x: x['live_total_points'], reverse=True)
-
-    live_rank = "N/A"
-    selected_manager_details = None
-    for i, mgr_data in enumerate(manager_live_scores):
-        if mgr_data['id'] == manager_id:
-            live_rank = i + 1
-            selected_manager_details = mgr_data
-            break
-
-    if not selected_manager_details:
-        await interaction.followup.send("Could not calculate live data for the selected manager.")
-        return
-
-    summary_data = {
-        "rank": live_rank,
-        "gw_points": selected_manager_details['final_gw_points'],
-        "total_points": selected_manager_details['live_total_points'],
-        "team_name": selected_manager_details['team_name']
-    }
-
-    fpl_data_for_image = {
-        "bootstrap": bootstrap_data,
-        "live": live_data,
-        "picks": selected_manager_details['picks_data']
-    }
-
-    image_bytes = await asyncio.to_thread(generate_team_image, fpl_data_for_image, summary_data, is_finished=is_finished)
-    if image_bytes:
-        file = discord.File(fp=image_bytes, filename="fpl_team.png")
-        manager_name = selected_manager_details.get('name', 'Manager')
-        stats_url = f"{WEBSITE_URL}/manager/{manager_id}/stats"
-        await interaction.followup.send(
-            f"**[{manager_name}'s Team for GW {current_gw}](<{stats_url}>)**",
-            file=file
-        )
+        manager_details = []
+        for manager in standings_results:
+            picks_data = cached_picks.get(manager['entry']) or {}
+            manager_details.append({
+                'id': manager['entry'],
+                'name': manager['player_name'],
+                'team_name': manager['entry_name'],
+                'live_total_points': manager.get('total', 0),
+                'final_gw_points': manager.get('event_total', 0),
+                'players_played': 0,
+                'picks_data': {
+                    'active_chip': picks_data.get('active_chip')
+                },
+                'prev_rank': manager.get('last_rank', 0),
+            })
     else:
-        await interaction.followup.send("Sorry, there was an error creating the team image.")
+        # --- Fetch cached picks and history for all managers ---
+        raw_picks, raw_history = await asyncio.gather(
+            get_league_picks(session, int(league_id), current_gw),
+            get_league_history(session, int(league_id))
+        )
+        cached_picks = {int(k): v for k, v in (raw_picks or {}).items() if str(k).isdigit()}
+        cached_history = {int(k): v for k, v in (raw_history or {}).items() if str(k).isdigit()}
 
-@team.autocomplete('manager')
-async def team_autocomplete(interaction: discord.Interaction, current: str):
-    league_id = get_league_id_for_context(interaction)
-    if not league_id:
-        return []
+        # --- Process and Display ---
+        live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
+        all_players_map = {p['id']: p for p in bootstrap_data.get('elements', [])}
 
-    all_teams = await asyncio.to_thread(get_all_teams_for_autocomplete, league_id, current)
-    
-    choices = [
-        app_commands.Choice(name=f"{team_name} ({manager_name})", value=str(fpl_team_id))
-        for fpl_team_id, team_name, manager_name in all_teams
-    ]
-    return choices[:25]
+        tasks = [
+            get_live_manager_details(
+                session, manager, current_gw, live_points_map, all_players_map, live_data,
+                is_finished=is_finished, cached_picks=cached_picks, cached_history=cached_history
+            )
+            for manager in standings_results
+        ]
+        manager_details = [res for res in await asyncio.gather(*tasks) if res]
+
+        manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
+
+        prev_rank_map = {}
+        for entry in standings_results:
+            prev_rank_map[entry['entry']] = entry.get('last_rank', 0)
+
+        for manager in manager_details:
+            manager['prev_rank'] = prev_rank_map.get(manager['id'], 0)
 
 @bot.tree.command(name="table", description="Displays the live FPL league table.")
 async def table(interaction: discord.Interaction):
@@ -1409,25 +1386,19 @@ async def table(interaction: discord.Interaction):
     if not league_id:
         return
 
-    # --- Gameweek and Data determination ---
     bootstrap_data = await get_bootstrap(session)
     if not bootstrap_data:
         await interaction.followup.send("Could not fetch FPL bootstrap data.")
         return
 
-    # Find the current or last finished gameweek
-    gw_event = next((event for event in bootstrap_data.get('events', []) if event['is_current']), None)
-    if not gw_event:
-        gw_event = next((event for event in sorted(bootstrap_data.get('events', []), key=lambda x: x['id'], reverse=True) if event['finished']), None)
-
-    if not gw_event:
+    gw_info = await get_gameweek_info(session, bootstrap_data)
+    if not gw_info:
         await interaction.followup.send("Could not determine the current or last gameweek.")
         return
 
-    current_gw = gw_event['id']
-    is_finished = gw_event['finished']
+    current_gw = gw_info['gw']
+    is_finished = gw_info['is_finished']
 
-    # Try to use the live cache if it's for the correct gameweek
     live_data = bot.live_fpl_data
     if not live_data or live_data.get('gw') != current_gw:
         live_data = await backend_get_live_data(session, current_gw)
@@ -1438,48 +1409,62 @@ async def table(interaction: discord.Interaction):
         await interaction.followup.send(f"Could not fetch data for Gameweek {current_gw}.")
         return
 
-    # --- Fetch league data ---
     league_data = await get_league_standings(session, int(league_id))
     if not league_data:
         await interaction.followup.send("Failed to fetch FPL league data.")
         return
 
-    # --- Fetch cached picks and history for all managers ---
-    raw_picks, raw_history = await asyncio.gather(
-        get_league_picks(session, int(league_id), current_gw),
-        get_league_history(session, int(league_id))
-    )
-    cached_picks = {int(k): v for k, v in (raw_picks or {}).items()}
-    cached_history = {int(k): v for k, v in (raw_history or {}).items()}
+    standings_results = league_data.get('standings', {}).get('results', [])
 
-    # --- Process and Display ---
-    live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
-    all_players_map = {p['id']: p for p in bootstrap_data.get('elements', [])}
+    if is_finished:
+        raw_picks = await get_league_picks(session, int(league_id), current_gw)
+        cached_picks = {int(k): v for k, v in (raw_picks or {}).items() if str(k).isdigit()}
 
-    tasks = [
-        get_live_manager_details(
-            session, manager, current_gw, live_points_map, all_players_map, live_data,
-            is_finished=is_finished, cached_picks=cached_picks, cached_history=cached_history
+        manager_details = []
+        for manager in standings_results:
+            picks_data = cached_picks.get(manager['entry']) or {}
+            manager_details.append({
+                'id': manager['entry'],
+                'name': manager['player_name'],
+                'team_name': manager['entry_name'],
+                'live_total_points': manager.get('total', 0),
+                'final_gw_points': manager.get('event_total', 0),
+                'players_played': 0,
+                'picks_data': {
+                    'active_chip': picks_data.get('active_chip')
+                },
+                'prev_rank': manager.get('last_rank', 0),
+            })
+    else:
+        raw_picks, raw_history = await asyncio.gather(
+            get_league_picks(session, int(league_id), current_gw),
+            get_league_history(session, int(league_id))
         )
-        for manager in league_data.get('standings', {}).get('results', [])
-    ]
-    manager_details = [res for res in await asyncio.gather(*tasks) if res]
+        cached_picks = {int(k): v for k, v in (raw_picks or {}).items() if str(k).isdigit()}
+        cached_history = {int(k): v for k, v in (raw_history or {}).items() if str(k).isdigit()}
 
-    manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
+        live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
+        all_players_map = {p['id']: p for p in bootstrap_data.get('elements', [])}
+
+        tasks = [
+            get_live_manager_details(
+                session, manager, current_gw, live_points_map, all_players_map, live_data,
+                is_finished=is_finished, cached_picks=cached_picks, cached_history=cached_history
+            )
+            for manager in standings_results
+        ]
+        manager_details = [res for res in await asyncio.gather(*tasks) if res]
+        manager_details.sort(key=lambda x: x['live_total_points'], reverse=True)
+
+        prev_rank_map = {}
+        for entry in standings_results:
+            prev_rank_map[entry['entry']] = entry.get('last_rank', 0)
+
+        for manager in manager_details:
+            manager['prev_rank'] = prev_rank_map.get(manager['id'], 0)
 
     TABLE_LIMIT = 25
 
-    # --- Compute previous rank from last GW standings ---
-    # league_data standings are ordered by last_rank (pre-live rank)
-    prev_rank_map = {}
-    for entry in league_data.get('standings', {}).get('results', []):
-        prev_rank_map[entry['entry']] = entry.get('last_rank', 0)
-
-    # Attach prev_rank to each manager detail
-    for manager in manager_details:
-        manager['prev_rank'] = prev_rank_map.get(manager['id'], 0)
-
-    # --- Generate image table ---
     from bot.image_generator import generate_league_table_image
 
     table_image = generate_league_table_image(
@@ -1495,7 +1480,6 @@ async def table(interaction: discord.Interaction):
         link_text = f"[View full league stats at LiveFPLStats](<{WEBSITE_URL}/league?{league_id}>)"
         await interaction.followup.send(content=link_text, file=file)
     else:
-        # Fallback to text table if image generation fails
         await _send_text_table(interaction, league_data, manager_details[:TABLE_LIMIT], current_gw, league_id)
 
 async def _send_text_table(interaction, league_data, manager_details, current_gw, league_id):
@@ -1567,7 +1551,7 @@ async def player(interaction: discord.Interaction, player: str):
 
     # Use backend league picks (DB-cached)
     raw_picks = await get_league_picks(session, int(league_id), current_gw)
-    all_picks = {int(k): v for k, v in (raw_picks or {}).items()}
+    all_picks = {int(k): v for k, v in (raw_picks or {}).items() if str(k).isdigit()}
 
     owners = []
     benched = []
@@ -1762,7 +1746,7 @@ async def dreamteam(interaction: discord.Interaction):
 
     # Use backend league picks (DB-cached)
     raw_picks = await get_league_picks(session, int(league_id), last_completed_gw)
-    all_picks = {int(k): v for k, v in (raw_picks or {}).items()}
+    all_picks = {int(k): v for k, v in (raw_picks or {}).items() if str(k).isdigit()}
 
     # Get all unique players from all managers' squads for the completed gameweek
     all_squad_players = {}
@@ -2110,3 +2094,9 @@ if __name__ == "__main__":
         logger.critical("DISCORD_BOT_TOKEN not found in .env file. Please create a .env file with your bot token.")
     else:
         bot.run(DISCORD_BOT_TOKEN)
+
+
+
+
+
+

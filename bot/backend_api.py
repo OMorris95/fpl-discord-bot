@@ -5,6 +5,7 @@ caching in PostgreSQL, proxy rotation, and rate limiting.
 """
 
 import os
+from datetime import datetime, timezone
 import aiohttp
 from bot.logging_config import get_logger
 
@@ -164,7 +165,10 @@ async def get_last_completed_gameweek(session: aiohttp.ClientSession) -> int | N
 
 async def get_gameweek_info(session: aiohttp.ClientSession, bootstrap_data: dict = None) -> dict | None:
     """
-    Get current or last finished gameweek info.
+    Match the website behavior:
+    - if the current GW deadline has passed, use the current GW
+    - otherwise use the last fully settled GW
+
     Returns: { 'gw': int, 'is_finished': bool, 'event': dict } or None
     """
     if not bootstrap_data:
@@ -173,7 +177,20 @@ async def get_gameweek_info(session: aiohttp.ClientSession, bootstrap_data: dict
         return None
 
     events = bootstrap_data.get('events', [])
-    gw_event = next((e for e in events if e.get('is_current')), None)
+    current_event = next((e for e in events if e.get('is_current')), None)
+    gw_event = None
+
+    if current_event:
+        deadline_time = current_event.get('deadline_time')
+        if deadline_time:
+            deadline = datetime.fromisoformat(deadline_time.replace('Z', '+00:00'))
+            if datetime.now(timezone.utc) > deadline:
+                gw_event = current_event
+
+    if not gw_event:
+        settled = [e for e in events if e.get('finished') and e.get('data_checked')]
+        if settled:
+            gw_event = max(settled, key=lambda x: x['id'])
 
     if not gw_event:
         finished = [e for e in events if e.get('finished')]
@@ -185,7 +202,7 @@ async def get_gameweek_info(session: aiohttp.ClientSession, bootstrap_data: dict
 
     return {
         'gw': gw_event['id'],
-        'is_finished': gw_event.get('finished', False),
+        'is_finished': gw_event.get('finished', False) and gw_event.get('data_checked', False),
         'event': gw_event,
     }
 
@@ -235,3 +252,5 @@ async def get_captain_suggestion(session: aiohttp.ClientSession, manager_id: int
 async def get_transfer_suggestions(session: aiohttp.ClientSession, manager_id: int) -> dict | None:
     """Get top 3 transfer suggestions for a manager."""
     return await _bot_get(session, f"/api/bot/transfer-suggestions/{manager_id}")
+
+

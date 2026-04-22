@@ -75,7 +75,7 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
         live_points_map: Dict mapping player_id -> stats dict
         all_players_map: Dict mapping player_id -> player info dict
         live_data: Live data dict with 'fixtures' key
-        is_finished: Whether the gameweek is finished
+        is_finished: Whether the gameweek is fully settled (finished and data_checked)
         cached_picks: Dict mapping manager_id (int) -> picks data
         cached_history: Dict mapping manager_id (int) -> history data
     """
@@ -95,19 +95,21 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
     final_gw_points = 0
     scoring_picks = []
 
-    # The API's official points are the source of truth if available for a finished GW
-    if is_finished and picks_data.get('automatic_subs'):
+    # The API's official points are the source of truth once the GW is fully settled
+    if is_finished and picks_data.get('entry_history'):
         final_gw_points = picks_data['entry_history']['points']
 
-        # Determine scoring picks for the image based on auto-subs
+        # Determine scoring picks for the image based on official automatic subs when present
         automatic_subs = picks_data.get('automatic_subs', [])
         subs_in = {sub['element_in'] for sub in automatic_subs}
         subs_out = {sub['element_out'] for sub in automatic_subs}
 
         for p in picks_data['picks']:
             is_starter = p['position'] <= 11
-            if (is_starter and p['element'] not in subs_out) or \
-               (not is_starter and p['element'] in subs_in):
+            if automatic_subs:
+                if (is_starter and p['element'] not in subs_out) or (not is_starter and p['element'] in subs_in):
+                    scoring_picks.append(p)
+            elif is_starter:
                 scoring_picks.append(p)
     else:
         # --- Manual calculation (for live GWs or when official points are not ready) ---
@@ -244,3 +246,5 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
         "players_played": players_played_count,
         "picks_data": picks_data
     }
+
+
