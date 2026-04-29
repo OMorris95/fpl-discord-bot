@@ -12,7 +12,7 @@ logger = get_logger('image')
 BACKGROUND_IMAGE_PATH = "mobile-pitch-graphic.png"
 DREAMTEAM_BACKGROUND_PATH = "dream-pitch-graphic.png"
 FONT_PATH = "Geist-Medium.otf"
-JERSEYS_DIR = "team_jerseys"
+JERSEYS_DIR = os.getenv("JERSEYS_DIR", "team_jerseys")
 JERSEY_SIZE = (85, 113)  # ~18% smaller than original 104x146, maintains aspect ratio
 
 # --- Layout & Styling ---
