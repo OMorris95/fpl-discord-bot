@@ -122,11 +122,30 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
         # Predict bonus points for in-progress fixtures (BPS-based 3/2/1 allocation)
         bonus_predictions = predict_bonus(gw_fixtures)
 
+        all_gw_fixtures_finished = bool(gw_fixtures) and all(f.get('finished', False) for f in gw_fixtures)
+
         def has_team_finished(team_id):
             team_fixtures = [f for f in gw_fixtures if f['team_h'] == team_id or f['team_a'] == team_id]
             if not team_fixtures:
-                return False
+                return all_gw_fixtures_finished
             return all(f.get('finished', False) for f in team_fixtures)
+
+        def is_bench_player_eligible(player_id):
+            team_id = all_players_map.get(player_id, {}).get('team')
+            minutes = live_points_map.get(player_id, {}).get('minutes', 0)
+            return minutes > 0 or not has_team_finished(team_id)
+
+        def is_valid_formation(squad_picks):
+            counts = {1: 0, 2: 0, 3: 0, 4: 0}
+            for pick in squad_picks:
+                player_type = all_players_map[pick['element']]['element_type']
+                counts[player_type] += 1
+            return (
+                counts[1] == 1 and
+                3 <= counts[2] <= 5 and
+                2 <= counts[3] <= 5 and
+                1 <= counts[4] <= 3
+            )
 
         # Determine captain status
         captain_pick = next((p for p in picks_data['picks'] if p['is_captain']), None)
@@ -155,12 +174,12 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
                 gk_minutes = live_points_map.get(starting_gk['element'], {}).get('minutes', 0)
                 if gk_minutes == 0 and has_team_finished(gk_team_id):
                     sub_gk = next((p for p in bench if all_players_map[p['element']]['element_type'] == 1), None)
-                    if sub_gk and live_points_map.get(sub_gk['element'], {}).get('minutes', 0) > 0:
+                    if sub_gk and is_bench_player_eligible(sub_gk['element']):
                         squad = [sub_gk if p == starting_gk else p for p in squad]
 
             # 2. Substitute outfield players
             for sub_in_player in bench:
-                if all_players_map[sub_in_player['element']]['element_type'] == 1 or live_points_map.get(sub_in_player['element'], {}).get('minutes', 0) == 0:
+                if all_players_map[sub_in_player['element']]['element_type'] == 1 or not is_bench_player_eligible(sub_in_player['element']):
                     continue
 
                 # Find a starter to replace with this bench player
@@ -176,13 +195,7 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
                         potential_squad = list(squad)
                         potential_squad[i] = sub_in_player
 
-                        # Validate formation
-                        counts = {1: 0, 2: 0, 3: 0, 4: 0}
-                        for p in potential_squad:
-                            player_type = all_players_map[p['element']]['element_type']
-                            counts[player_type] += 1
-
-                        if counts[1] == 1 and counts[2] >= 3 and counts[3] >= 2 and counts[4] >= 1:
+                        if is_valid_formation(potential_squad):
                             squad = potential_squad
                             break  # Sub successful, move to next bench player
 
@@ -207,11 +220,9 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
                 else:  # Captain didn't play and their game is over
                     effective_multiplier = 1
             elif p['is_vice_captain'] and not captain_played:
-                vice_captain_minutes = live_points_map.get(p['element'], {}).get('minutes', 0)
-                if vice_captain_minutes > 0:
-                    # Promote VC only if they are in the final scoring picks and have played
-                    if any(sp['element'] == p['element'] for sp in scoring_picks):
-                        effective_multiplier = 2
+                # Promote VC only if they are in the final scoring picks and have played
+                if any(sp['element'] == p['element'] for sp in scoring_picks) and live_points_map.get(p['element'], {}).get('minutes', 0) > 0:
+                    effective_multiplier = 3 if active_chip == '3xc' else 2
 
             p['final_multiplier'] = effective_multiplier
 
