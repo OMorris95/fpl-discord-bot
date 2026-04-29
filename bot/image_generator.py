@@ -38,8 +38,8 @@ GLASS_CORNER_RADIUS = 10    # Rounded top corners
 
 
 def format_player_price(player):
-    """Return player's price as Â£X.Xm string."""
-    return f"Â£{player.get('now_cost', 0) / 10:.1f}m"
+    """Return player's price as £X.Xm string."""
+    return f"£{player.get('now_cost', 0) / 10:.1f}m"
 
 
 def build_manager_url(entry_id, gameweek=None, base_url=None):
@@ -681,7 +681,7 @@ FONT_REGULAR = "Geist-Regular.otf"
 FONT_SEMIBOLD = "Geist-SemiBold.otf"
 FONT_BOLD = "Geist-Bold.otf"
 
-# FDR colors â€” exact match to website CSS (theme-variables.css)
+# FDR colors — exact match to website CSS (theme-variables.css)
 FDR_COLORS = {
     1: ("#2c6f00", "#FFFFFF"),  # dark green bg, white text
     2: ("#01fc7a", "#000000"),  # bright green bg, black text
@@ -893,7 +893,7 @@ def generate_league_table_image(league_name, current_gw, managers, website_url=N
     # Footer
     footer_y = col_header_bottom + (num_managers * row_height)
     draw.line([(0, footer_y), (img_width, footer_y)], fill=TABLE_BORDER, width=1)
-    footer_text = f"GW{current_gw} â€¢ livefplstats.com"
+    footer_text = f"GW{current_gw} • livefplstats.com"
     draw.text((img_width // 2, footer_y + footer_height // 2), footer_text,
               font=footer_font, fill=TABLE_TEXT_MUTED, anchor="mm")
 
@@ -1088,7 +1088,7 @@ def generate_gw_summary_image(gw_number, league_name, captains_data, transfers_i
 
     # Footer
     draw.line([(0, y), (img_width, y)], fill=TABLE_BORDER, width=1)
-    footer_text = f"GW{gw_number} â€¢ livefplstats.com"
+    footer_text = f"GW{gw_number} • livefplstats.com"
     draw.text((img_width // 2, y + footer_height // 2), footer_text, font=footer_font, fill=TABLE_TEXT_MUTED, anchor="mm")
 
     # Gradient bar
@@ -1277,7 +1277,7 @@ def generate_recap_image(gw_number, league_name, shame_data, praise_data):
     # Footer
     footer_y = header_height + shame_section_h + praise_section_h
     draw.line([(0, footer_y), (img_width, footer_y)], fill=TABLE_BORDER, width=1)
-    draw.text((img_width // 2, footer_y + footer_height // 2), f"GW{gw_number} â€¢ livefplstats.com",
+    draw.text((img_width // 2, footer_y + footer_height // 2), f"GW{gw_number} • livefplstats.com",
               font=footer_font, fill=TABLE_TEXT_MUTED, anchor="mm")
 
     # Gradient bar
@@ -1305,7 +1305,7 @@ def _draw_footer(draw, img, img_width, footer_y, footer_height, current_gw, font
     """Draw the standard footer bar with gradient at the bottom."""
     draw.line([(0, footer_y), (img_width, footer_y)], fill=TABLE_BORDER, width=1)
     ftr_font = ImageFont.truetype(FONT_PATH, font_size)
-    footer_text = f"GW{current_gw} â€¢ livefplstats.com"
+    footer_text = f"GW{current_gw} • livefplstats.com"
     draw.text((img_width // 2, footer_y + footer_height // 2), footer_text,
               font=ftr_font, fill=TABLE_TEXT_MUTED, anchor="mm")
 
@@ -1431,7 +1431,7 @@ def generate_player_ownership_image(player_info, team_info, current_gw,
         # --- Club + Position ---
         detail_font = ImageFont.truetype(FONT_PATH, 13)
         position = POSITION_MAP.get(player_info.get('element_type', 0), "")
-        club_pos_text = f"{team_name}  â€¢  {position}"
+        club_pos_text = f"{team_name}  •  {position}"
         draw.text((img_width // 2, y), club_pos_text,
                   font=detail_font, fill=TABLE_TEXT_MUTED, anchor="ma")
         y += 16 + 4
@@ -1553,7 +1553,7 @@ def generate_player_ownership_image(player_info, team_info, current_gw,
 
 
 # =====================================================
-# Fixtures â€” Single Team Image
+# Fixtures — Single Team Image
 # =====================================================
 
 def generate_fixtures_single_image(team_info, fixtures, current_gw):
@@ -1593,7 +1593,7 @@ def generate_fixtures_single_image(team_info, fixtures, current_gw):
         draw.text((padding_x, header_height // 2), f"{team_name} Fixtures",
                   font=hdr_font, fill=TABLE_TEXT_BLACK, anchor="lm")
         gws = list(gw_groups.keys())
-        gw_range_text = f"GW{gws[0]}â€“GW{gws[-1]}" if gws else ""
+        gw_range_text = f"GW{gws[0]}–GW{gws[-1]}" if gws else ""
         draw.text((img_width - padding_x, header_height // 2), gw_range_text,
                   font=hdr_detail_font, fill=TABLE_TEXT_MUTED, anchor="rm")
         draw.line([(0, header_height), (img_width, header_height)], fill=TABLE_BORDER, width=1)
@@ -1691,7 +1691,7 @@ def generate_fixtures_single_image(team_info, fixtures, current_gw):
 
 
 # =====================================================
-# Fixtures â€” All Teams Image
+# Fixtures — All Teams Image
 # =====================================================
 
 def generate_fixtures_all_image(teams_fixtures, gw_range, current_gw):
@@ -1724,7 +1724,7 @@ def generate_fixtures_all_image(teams_fixtures, gw_range, current_gw):
         hdr_detail_font = ImageFont.truetype(FONT_PATH, 15)
         draw.text((padding_x, header_height // 2), "Fixture Difficulty",
                   font=hdr_font, fill=TABLE_TEXT_BLACK, anchor="lm")
-        gw_range_text = f"GW{gw_range[0]}â€“GW{gw_range[-1]}" if gw_range else ""
+        gw_range_text = f"GW{gw_range[0]}–GW{gw_range[-1]}" if gw_range else ""
         draw.text((img_width - padding_x, header_height // 2), gw_range_text,
                   font=hdr_detail_font, fill=TABLE_TEXT_MUTED, anchor="rm")
         draw.line([(0, header_height), (img_width, header_height)], fill=TABLE_BORDER, width=1)
@@ -1789,7 +1789,7 @@ def generate_fixtures_all_image(teams_fixtures, gw_range, current_gw):
                     draw.text((cx + cell_w // 2, row_center_y), cell_text,
                               font=cell_font, fill=fdr_text, anchor="mm")
                 else:
-                    # DGW â€” split cell
+                    # DGW — split cell
                     half_w = (cell_w - 2) // 2
                     for fi, f in enumerate(fxs[:2]):
                         fdr = f.get('fdr', 3)
@@ -1816,3 +1816,4 @@ def generate_fixtures_all_image(teams_fixtures, gw_range, current_gw):
     except Exception as e:
         logger.error(f"Error generating all fixtures image: {e}", exc_info=True)
         return None
+
