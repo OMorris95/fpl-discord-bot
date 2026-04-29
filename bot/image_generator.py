@@ -1219,6 +1219,7 @@ def generate_recap_image(gw_number, league_name, shame_data, praise_data):
             elif extra_players > 1:
                 detail_lines.append(f'+{extra_players} players')
             name_rows = math.ceil(len(names) / 2)
+            value_str = f"{data[0]['value']} pts"
             detail_rows = max(1, len(detail_lines)) if detail_lines else 1
             card_h = base_card_height + max(0, max(name_rows, detail_rows) - 1) * row_line_h
         else:
