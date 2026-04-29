@@ -1116,22 +1116,25 @@ SHAME_BG = "#FEF2F2"    # subtle red
 PRAISE_BG = "#F0FDF4"   # subtle green
 
 
-def _draw_metric_card(draw, x, y, width, category, manager_names, detail, value_str, value_color, fonts):
+def _draw_metric_card(draw, x, y, width, category, manager_names, detail_lines, value_str, value_color, fonts):
     """Draw a single metric card (rounded rect with category, managers, detail, value).
 
     Args:
-        manager_names: list of manager name strings (will be shown two per row)
+        manager_names: list of manager name strings
     """
     import math
     card_font_cat, card_font_name, card_font_detail, card_font_value = fonts
 
     if isinstance(manager_names, str):
         manager_names = [manager_names]
+    if isinstance(detail_lines, str):
+        detail_lines = [detail_lines] if detail_lines else []
 
     name_rows = math.ceil(len(manager_names) / 2)
+    detail_rows = max(1, len(detail_lines)) if detail_lines else 1
     row_line_h = 18
     base_height = 56
-    extra = max(0, name_rows - 1) * row_line_h
+    extra = max(0, max(name_rows, detail_rows) - 1) * row_line_h
     height = base_height + extra
 
     # Card background
@@ -1150,9 +1153,12 @@ def _draw_metric_card(draw, x, y, width, category, manager_names, detail, value_
             draw.text((col2_x, name_y), manager_names[i + 1], font=card_font_name, fill=TABLE_TEXT_BLACK)
         name_y += row_line_h
 
-    # Detail text (center-right area, if present)
-    if detail:
-        draw.text((x + width - 80, y + 28), detail, font=card_font_detail, fill=TABLE_TEXT_MUTED, anchor="ra")
+    # Detail text (center-right area, vertically stacked when there are multiple items)
+    if detail_lines:
+        detail_y = y + 28
+        for line in detail_lines:
+            draw.text((x + width - 80, detail_y), line, font=card_font_detail, fill=TABLE_TEXT_MUTED, anchor="ra")
+            detail_y += row_line_h
 
     # Value (far right)
     draw.text((x + width - 16, y + 28), value_str, font=card_font_value, fill=value_color, anchor="ra")
@@ -1202,21 +1208,25 @@ def generate_recap_image(gw_number, league_name, shame_data, praise_data):
     card_fonts = (card_cat_font, card_name_font, card_detail_font, card_value_font)
 
     def _prep_metric(category, data):
-        """Prepare display data for a metric, return (manager_names_list, detail, value_str, card_h)."""
+        """Prepare display data for a metric, return (manager_names_list, detail_lines, value_str, card_h)."""
         if data:
             names = [d['manager_name'] for d in data]
             unique_players = list(dict.fromkeys(d.get('player_name', '') for d in data if d.get('player_name')))
-            player_str = ", ".join(unique_players)
-            detail = player_str
+            detail_lines = unique_players[:3]
+            extra_players = len(unique_players) - len(detail_lines)
+            if extra_players > 0:
+                suffix = 'player' if extra_players == 1 else 'players'
+                detail_lines.append(f'+{extra_players} {suffix}')
             value_str = f"{data[0]['value']} pts"
             name_rows = math.ceil(len(names) / 2)
-            card_h = base_card_height + max(0, name_rows - 1) * row_line_h
+            detail_rows = max(1, len(detail_lines)) if detail_lines else 1
+            card_h = base_card_height + max(0, max(name_rows, detail_rows) - 1) * row_line_h
         else:
             names = ["-"]
-            detail = ""
+            detail_lines = []
             value_str = "No data"
             card_h = base_card_height
-        return names, detail, value_str, card_h
+        return names, detail_lines, value_str, card_h
 
     # Pre-compute all metrics to get dynamic heights
     shame_metrics_raw = [

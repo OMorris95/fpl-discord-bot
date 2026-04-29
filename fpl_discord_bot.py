@@ -1995,7 +1995,8 @@ async def fixtures(interaction: discord.Interaction, team: str = None):
                 'is_blank': False,
             })
 
-        gw_range = list(range(next_gw, next_gw + 5))
+        max_gw = max((event.get('id', 0) for event in bootstrap_data.get('events', [])), default=next_gw)
+        gw_range = list(range(next_gw, min(next_gw + 5, max_gw + 1)))
 
         teams_fixtures = []
         for team_id, team_data in sorted(teams_map.items(), key=lambda x: x[1]['name']):
