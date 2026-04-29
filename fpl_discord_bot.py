@@ -1328,22 +1328,23 @@ async def team(interaction: discord.Interaction, manager: str = None):
     standings_results = league_data.get('standings', {}).get('results', [])
 
     # For settled GWs, mirror the website exactly: use official standings totals.
+    # For settled GWs, still run through get_live_manager_details so scoring_picks
+    # is populated from official automatic_subs for correct image rendering.
     if is_finished:
         raw_picks = await get_league_picks(session, int(league_id), current_gw)
         cached_picks = {int(k): v for k, v in (raw_picks or {}).items() if str(k).isdigit()}
 
-        manager_details = []
-        for manager in standings_results:
-            picks_data = cached_picks.get(manager['entry']) or {}
-            manager_details.append({
-                'id': manager['entry'],
-                'name': manager['player_name'],
-                'team_name': manager['entry_name'],
-                'live_total_points': manager.get('total', 0),
-                'final_gw_points': manager.get('event_total', 0),
-                'players_played': 0,
-                'picks_data': picks_data,
-            })
+        live_points_map = {p['id']: p['stats'] for p in live_data.get('elements', [])}
+        all_players_map = {p['id']: p for p in bootstrap_data.get('elements', [])}
+
+        tasks = [
+            get_live_manager_details(
+                session, manager, current_gw, live_points_map, all_players_map, live_data,
+                is_finished=is_finished, cached_picks=cached_picks, cached_history={}
+            )
+            for manager in standings_results
+        ]
+        manager_details = [res for res in await asyncio.gather(*tasks) if res]
     else:
         # --- Fetch cached picks and history for all managers ---
         raw_picks, raw_history = await asyncio.gather(
