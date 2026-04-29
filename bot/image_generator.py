@@ -1214,10 +1214,10 @@ def generate_recap_image(gw_number, league_name, shame_data, praise_data):
             unique_players = list(dict.fromkeys(d.get('player_name', '') for d in data if d.get('player_name')))
             detail_lines = unique_players[:3]
             extra_players = len(unique_players) - len(detail_lines)
-            if extra_players > 0:
-                suffix = 'player' if extra_players == 1 else 'players'
-                detail_lines.append(f'+{extra_players} {suffix}')
-            value_str = f"{data[0]['value']} pts"
+            if extra_players == 1:
+                detail_lines.append(unique_players[3])
+            elif extra_players > 1:
+                detail_lines.append(f'+{extra_players} players')
             name_rows = math.ceil(len(names) / 2)
             detail_rows = max(1, len(detail_lines)) if detail_lines else 1
             card_h = base_card_height + max(0, max(name_rows, detail_rows) - 1) * row_line_h
