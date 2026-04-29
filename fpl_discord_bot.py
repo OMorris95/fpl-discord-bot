@@ -1378,6 +1378,51 @@ async def team(interaction: discord.Interaction, manager: str = None):
         for manager in manager_details:
             manager['prev_rank'] = prev_rank_map.get(manager['id'], 0)
 
+    selected_manager = next((m for m in manager_details if m['id'] == manager_id), None)
+    if not selected_manager:
+        await interaction.followup.send("Could not find that manager in the configured league.", ephemeral=True)
+        return
+
+    picks_data = selected_manager.get('picks_data') or {}
+    if not picks_data.get('picks'):
+        await interaction.followup.send("Could not fetch that manager's picks for this gameweek.", ephemeral=True)
+        return
+
+    fpl_data = {
+        'bootstrap': bootstrap_data,
+        'live': live_data,
+        'picks': picks_data,
+    }
+    summary_data = {
+        'team_name': selected_manager['team_name'],
+        'gw_points': selected_manager['final_gw_points'],
+        'total_points': selected_manager['live_total_points'],
+    }
+
+    image_data = await asyncio.to_thread(generate_team_image, fpl_data, summary_data, is_finished)
+
+    if image_data:
+        file = discord.File(image_data, filename="fpl_team.png")
+        link_text = format_manager_link("View manager stats at LiveFPLStats", manager_id, current_gw, WEBSITE_URL)
+        await interaction.followup.send(content=link_text, file=file)
+    else:
+        await interaction.followup.send("Failed to generate team image.", ephemeral=True)
+
+
+@team.autocomplete('manager')
+async def team_autocomplete(interaction: discord.Interaction, current: str):
+    league_id = get_league_id_for_context(interaction)
+    if not league_id:
+        return []
+
+    all_teams = await asyncio.to_thread(get_all_teams_for_autocomplete, league_id, current)
+
+    choices = [
+        app_commands.Choice(name=f"{team_name} ({manager_name})", value=str(fpl_team_id))
+        for fpl_team_id, team_name, manager_name in all_teams
+    ]
+    return choices
+
 @bot.tree.command(name="table", description="Displays the live FPL league table.")
 async def table(interaction: discord.Interaction):
     await interaction.response.defer()
