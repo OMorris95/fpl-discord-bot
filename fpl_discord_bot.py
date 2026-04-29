@@ -1342,10 +1342,7 @@ async def team(interaction: discord.Interaction, manager: str = None):
                 'live_total_points': manager.get('total', 0),
                 'final_gw_points': manager.get('event_total', 0),
                 'players_played': 0,
-                'picks_data': {
-                    'active_chip': picks_data.get('active_chip')
-                },
-                'prev_rank': manager.get('last_rank', 0),
+                'picks_data': picks_data,
             })
     else:
         # --- Fetch cached picks and history for all managers ---
