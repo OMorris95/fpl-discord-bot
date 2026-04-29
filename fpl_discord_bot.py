@@ -1345,6 +1345,19 @@ async def team(interaction: discord.Interaction, manager: str = None):
             for manager in standings_results
         ]
         manager_details = [res for res in await asyncio.gather(*tasks) if res]
+
+        official_totals = {
+            manager['entry']: {
+                'final_gw_points': manager.get('event_total', 0),
+                'live_total_points': manager.get('total', 0),
+            }
+            for manager in standings_results
+        }
+        for manager in manager_details:
+            official = official_totals.get(manager['id'])
+            if official:
+                manager['final_gw_points'] = official['final_gw_points']
+                manager['live_total_points'] = official['live_total_points']
     else:
         # --- Fetch cached picks and history for all managers ---
         raw_picks, raw_history = await asyncio.gather(

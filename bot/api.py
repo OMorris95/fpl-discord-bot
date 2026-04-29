@@ -1,4 +1,4 @@
-"""FPL live scoring computation for the Discord bot."""
+﻿"""FPL live scoring computation for the Discord bot."""
 
 from bot.logging_config import get_logger
 
@@ -52,7 +52,7 @@ def predict_bonus(gw_fixtures):
             while i + tie_count < len(all_players) and all_players[i + tie_count]['value'] == current_bps:
                 tie_count += 1
 
-            # Bonus for this rank: rank 1→3, rank 2→2, rank 3→1
+            # Bonus for this rank: rank 1â†’3, rank 2â†’2, rank 3â†’1
             bonus = max(0, 4 - rank)
 
             for j in range(tie_count):
@@ -104,13 +104,20 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
         subs_in = {sub['element_in'] for sub in automatic_subs}
         subs_out = {sub['element_out'] for sub in automatic_subs}
 
+        active_chip = picks_data.get('active_chip')
+
         for p in picks_data['picks']:
             is_starter = p['position'] <= 11
+            included = False
             if automatic_subs:
-                if (is_starter and p['element'] not in subs_out) or (not is_starter and p['element'] in subs_in):
-                    scoring_picks.append(p)
-            elif is_starter:
-                scoring_picks.append(p)
+                included = (is_starter and p['element'] not in subs_out) or (not is_starter and p['element'] in subs_in)
+            else:
+                included = is_starter
+
+            if included:
+                mp = dict(p)
+                mp['final_multiplier'] = 3 if (mp.get('is_captain') and active_chip == '3xc') else (2 if mp.get('is_captain') else 1)
+                scoring_picks.append(mp)
     else:
         # --- Manual calculation (for live GWs or when official points are not ready) ---
         gw_points = 0
