@@ -105,12 +105,32 @@ async def get_live_manager_details(session, manager_entry, current_gw, live_poin
         subs_out = {sub['element_out'] for sub in automatic_subs}
 
         active_chip = picks_data.get('active_chip')
+        captain_pick = next((p for p in picks_data['picks'] if p.get('is_captain')), None)
+        vice_pick = next((p for p in picks_data['picks'] if p.get('is_vice_captain')), None)
+        captain_played = True
+        if captain_pick:
+            captain_minutes = live_points_map.get(captain_pick['element'], {}).get('minutes', 0)
+            captain_played = captain_minutes > 0
 
         for p in picks_data['picks']:
             is_starter = p['position'] <= 11
             included = False
             if automatic_subs:
                 included = (is_starter and p['element'] not in subs_out) or (not is_starter and p['element'] in subs_in)
+            else:
+                included = is_starter
+
+            if included:
+                mp = dict(p)
+                final_multiplier = 1
+                if mp.get('is_captain'):
+                    final_multiplier = (3 if active_chip == '3xc' else 2) if captain_played else 1
+                elif mp.get('is_vice_captain') and not captain_played:
+                    vice_minutes = live_points_map.get(mp['element'], {}).get('minutes', 0)
+                    if vice_minutes > 0:
+                        final_multiplier = 3 if active_chip == '3xc' else 2
+                mp['final_multiplier'] = final_multiplier
+                scoring_picks.append(mp)
             else:
                 included = is_starter
 

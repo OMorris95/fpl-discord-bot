@@ -1414,9 +1414,9 @@ async def team(interaction: discord.Interaction, manager: str = None):
 
     if image_data:
         file = discord.File(image_data, filename="fpl_team.png")
-        link_text = format_manager_link("View manager stats at LiveFPLStats", manager_id, current_gw, WEBSITE_URL)
-        await interaction.followup.send(content=link_text, file=file)
-    else:
+        manager_url = build_manager_url(manager_id, current_gw, WEBSITE_URL)
+        link_text = f"[View manager stats at LiveFPLStats](<{manager_url}>)"
+        await interaction.followup.send(content=link_text, file=file, suppress_embeds=True)
         await interaction.followup.send("Failed to generate team image.", ephemeral=True)
 
 
