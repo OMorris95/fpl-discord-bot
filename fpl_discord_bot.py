@@ -9,6 +9,9 @@ from pathlib import Path
 import asyncio
 from dotenv import load_dotenv
 
+# Load environment variables from .env file before importing modules that read env at import time
+load_dotenv()
+
 from bot.logging_config import get_logger
 
 logger = get_logger('bot')
@@ -51,8 +54,6 @@ from bot.image_generator import (
     generate_fixtures_single_image, generate_fixtures_all_image,
 )
 
-# Load environment variables from .env file
-load_dotenv()
 
 # --- CONFIGURATION ---
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -2094,6 +2095,7 @@ if __name__ == "__main__":
         logger.critical("DISCORD_BOT_TOKEN not found in .env file. Please create a .env file with your bot token.")
     else:
         bot.run(DISCORD_BOT_TOKEN)
+
 
 
 
